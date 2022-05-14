@@ -1,0 +1,9 @@
+**/*.o
+**/*.so
+**/*.ini
+
+__pycache__
+.vscode/
+
+**/output
+**/cvt
