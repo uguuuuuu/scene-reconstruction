@@ -17,6 +17,7 @@ from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Matrix
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
 from utils import *
+import config
 
 '''
 Set up parameters
@@ -53,7 +54,7 @@ else:
 '''
 Record initial state 
 '''
-integrator = psdr_cuda.DirectIntegrator(bsdf_samples=2, light_samples=2)
+integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
 scene, ref_imgs = renderC_img(FLAGS['target_scene'], integrator, sensor_ids, res)
 for i, ref in enumerate(ref_imgs):
     save_img(ref, f'{outdir}/ref_{sensor_ids[i]}.png', res)
@@ -83,6 +84,10 @@ u.requires_grad_()
 opt = AdamUniform([u], lr)
 scene.opts.spp = 1
 scene.configure()
+config.scene = scene
+config.key = key
+config.integrator = integrator
+config.sensor_ids = sensor_ids
 
 img_losses = []
 reg_losses = []
@@ -92,12 +97,7 @@ Training Loop
 '''
 for it in tqdm(range(start_itr, start_itr + n_itr)):
     v = from_differential(M, u, method='CG')
-    imgs = renderDV({
-            'scene': scene,
-            'key': key,
-            'integrator': integrator,
-            'sensor_ids': sensor_ids
-        }, v)
+    imgs = renderDV(v)
     for i, id in enumerate(sensor_ids):
         save_img(imgs[i], f'{outdir}/{id}/train.{it+1:03}.png', res)
 
@@ -135,7 +135,7 @@ with torch.no_grad():
     scene.param_map[key].vertex_positions = Vector3fD(v)
     scene.configure()
     for i in sensor_ids:
-        save_img(integrator.renderC(scene, sensor_id=i), f'{outdir}/itr{it+1}_{i}.png', scene)
+        save_img(integrator.renderC(scene, sensor_id=i), f'{outdir}/itr{it+1}_{i}.png', res)
     scene.param_map[key].dump(f'{outdir}/optimized_itr{it+1}_l{lambda_}_lr{lr}.obj')
 
 '''
@@ -152,12 +152,13 @@ Observations:
 
 '''
     TODO
-    - Add more scenes
+    - Add more scenes (with effects like indirect illumination, shadows, refractions, etc.)
     - Use gamma-corrected RGB colors in computing losses instead of linear ones
     - Add mask loss
+        - Render mask images for synthetic scenes
+        - Obtain mask images for real-world input images (using Detectron2 for example)
     - Use scheduler during training
-    - *Implement DMTet*
-    - *Use DMTet to optimize a torus to a bunny*
+    - *Implement the two-stage pipeline to optimize geometry*
     - *Jointly optimize shape and material (fit a diffuse bsdf first)*
         - implement or use a uv mapping algorithm (e.g. BFF, xatlas)
 '''

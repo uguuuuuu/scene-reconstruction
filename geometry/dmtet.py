@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from enoki.cuda_autodiff import Vector3i as Vector3iD, Vector2f as Vector2fD, Vector3f as Vector3fD
 
-from utils import renderDV
+from . import mesh
 
 ###############################################################################
 # Marching tetrahedrons implementation (differentiable), adapted from
@@ -156,7 +156,7 @@ def sdf_reg_loss(sdf, all_edges):
 ###############################################################################
 
 class DMTetGeometry(torch.nn.Module):
-    def __init__(self, grid_res, scale):
+    def __init__(self, grid_res, scale, sdf = None, deform = None):
         super(DMTetGeometry, self).__init__()
 
         self.grid_res      = grid_res
@@ -168,13 +168,17 @@ class DMTetGeometry(torch.nn.Module):
         self.generate_edges()
 
         # Random init
-        sdf = torch.rand_like(self.verts[:,0]) - 0.1
-
+        if sdf is None: sdf = torch.rand_like(self.verts[:,0]) - 0.1
+        assert(sdf.shape[0] == self.verts.shape[0])
         self.sdf    = torch.nn.Parameter(sdf.clone().detach(), requires_grad=True)
         self.register_parameter('sdf', self.sdf)
 
-        self.deform = torch.nn.Parameter(torch.zeros_like(self.verts), requires_grad=True)
+        self.deform = torch.nn.Parameter(torch.zeros_like(self.verts) if deform is None else deform.clone().detach(),
+                                    requires_grad=True)
+        assert(self.deform.shape == self.verts.shape)
         self.register_parameter('deform', self.deform)
+
+        self.mesh_cache = None
 
     def generate_edges(self):
         with torch.no_grad():
@@ -188,26 +192,21 @@ class DMTetGeometry(torch.nn.Module):
         return torch.min(self.verts, dim=0).values, torch.max(self.verts, dim=0).values
 
     def getMesh(self):
+        if self.mesh_cache is not None: return self.mesh_cache
         # Run DM tet to get a base mesh
         v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
         verts, faces, uvs, uv_idx = self.marching_tets(v_deformed, self.sdf, self.indices)
+        imesh = mesh.Mesh(verts, faces, v_tex=uvs, t_tex_idx=uv_idx)
 
-        return verts, faces, uvs, uv_idx
+        # Run mesh operations to generate tangent space
+        imesh = mesh.auto_normals(imesh)
 
-    def forward(self, scene, key, integrator, sensor_ids):
-        v, f, uvs, uv_idx = self.getMesh()
-        print(v.shape)
-        print(f.shape)
-        print(uvs.shape)
-        print(uv_idx.shape)
-        scene.param_map[key].face_indices = Vector3iD(f.to(torch.int32))
-        scene.param_map[key].face_uv_indices = Vector3iD(uv_idx.to(torch.int32))
-        scene.param_map[key].vertex_positions = Vector3fD(v)
-        scene.param_map[key].vertex_uv = Vector2fD(uvs)
-        scene.param_map[key].configure()
-        return renderDV({
-            'scene': scene,
-            'key': key,
-            'integrator': integrator,
-            'sensor_ids': sensor_ids
-        }, v)
+        self.mesh_cache = imesh
+
+        return imesh
+
+    def forward(self, render_fn):
+        m = self.getMesh() if self.mesh_cache is None else self.mesh_cache
+        imgs = render_fn(m.v_pos)
+        self.mesh_cache = None
+        return imgs

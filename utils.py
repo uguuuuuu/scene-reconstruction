@@ -9,6 +9,7 @@ import psdr_cuda
 import enoki as ek
 from enoki.cuda_autodiff import Vector3f as Vector3fD, Float32 as FloatD
 from enoki.cuda import Vector3f as Vector3fC
+import config
 
 def linear2srgb(img):
     img[img <= 0.0031308] *= 12.92
@@ -145,18 +146,16 @@ def regularization_loss(L: torch.Tensor, v: torch.Tensor, sqr = False):
 
 class RenderD_Vert(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, params, v):
+    def forward(ctx, v):
         assert(v.requires_grad)
         scene, key, integrator, sensor_ids = \
-                    [params[k] for k in ['scene', 'key', 'integrator', 'sensor_ids']]
+            config.scene, config.key, config.integrator, config.sensor_ids
 
         ctx.v = Vector3fD(v)
         ek.set_requires_gradient(ctx.v)
         scene.param_map[key].vertex_positions = ctx.v
         scene.configure()
-        ctx.out = []
-        for id in sensor_ids:
-            ctx.out.append(integrator.renderD(scene, id))
+        ctx.out = [integrator.renderD(scene, id) for id in sensor_ids]
 
         out = torch.stack([img.torch() for img in ctx.out])
         # ek.cuda_malloc_trim()
@@ -167,27 +166,28 @@ class RenderD_Vert(torch.autograd.Function):
         for i in range(len(ctx.out)):
             ek.set_gradient(ctx.out[i], Vector3fC(grad_out[i]))
         FloatD.backward()
-        grad = ek.gradient(ctx.v).torch()
+
+        grad = ek.gradient(ctx.v)
+        nan_mask = ek.isnan(grad)
+        grad = ek.select(nan_mask, 0, grad).torch()
 
         del ctx.v, ctx.out
         # ek.cuda_malloc_trim()
-        return (None, grad)
+        return grad
 renderDV = RenderD_Vert.apply
 
 class RenderD_Mat(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, params, mat):
+    def forward(ctx, mat):
         assert(mat.requires_grad)
         scene, key, integrator, sensor_ids = \
-            [params[k] for k in ['scene', 'key', 'integrator', 'sensor_ids']]
+            config.scene, config.key, config.integrator, config.sensor_ids
 
         ctx.mat = Vector3fD(mat)
         ek.set_requires_gradient(ctx.mat)
         scene.param_map[key].bsdf.reflectance.data = ctx.mat
         scene.configure()
-        ctx.out = []
-        for id in sensor_ids:
-            ctx.out.append(integrator.renderD(scene, id))
+        ctx.out = [integrator.renderD(scene, id) for id in sensor_ids]
 
         out = torch.stack([img.torch() for img in ctx.out])
         # ek.cuda_malloc_trim()
@@ -198,11 +198,14 @@ class RenderD_Mat(torch.autograd.Function):
         for i in range(len(ctx.out)):
             ek.set_gradient(ctx.out[i], Vector3fC(grad_out[i]))
         FloatD.backward()
-        grad = ek.gradient(ctx.mat).torch()
+
+        grad = ek.gradient(ctx.mat)
+        nan_mask = ek.isnan(grad)
+        grad = ek.select(nan_mask, 0, grad).torch()
 
         del ctx.mat, ctx.out
         # ek.cuda_malloc_trim()
-        return (None, grad)
+        return grad
 renderDM = RenderD_Mat.apply
 
 class TimerError(Exception):

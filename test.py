@@ -9,38 +9,29 @@ from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Matrix
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
 from utils import *
-from dmtet import *
+from geometry.dmtet import *
+from geometry import obj, mesh, util
 import potpourri3d as pp3d
 import polyscope as ps
 from torch.nn import functional
 
 integrator = psdr_cuda.DirectIntegrator()
 scene = psdr_cuda.Scene()
-scene.load_file('data/scenes/sphere_env_largesteps.xml', False)
+scene.load_file('data/scenes/spot_env.xml', False)
 scene.opts.spp = 32
 scene.opts.width = 284
 scene.opts.height = 216
 
-# dmtet = DMTetGeometry(32, 2.1)
-# v, f, uvs, uv_idx = dmtet.getMesh()
-# scene.param_map['Mesh[0]'].load_mem(Vector3fD(v), Vector3iD(f.to(torch.int32)),
-#                     Vector2fD(uvs), Vector3iD(uv_idx.to(torch.int32)), True)
-scene.param_map['Mesh[0]'].load()
-scene.configure()
-img = integrator.renderC(scene, 2)
-save_img(img, 'img1.png', (284, 216))
+m = scene.param_map['Mesh[0]']
+v = m.vertex_positions.torch()
+f = m.face_indices.torch()
+uvs = m.vertex_uv.torch()
+uv_idx = m.face_uv_indices.torch()
+uvs[:,1] = 1. - uvs[:,1]
+m = mesh.Mesh(v, f, v_tex=uvs, t_tex_idx=uv_idx)
+m = mesh.auto_normals(m)
+obj.write_obj('.', m, True)
 
-scene.param_map['Mesh[0]'].load('data/meshes/sphere_2k.obj')
-scene.configure()
-img = integrator.renderC(scene, 2)
-save_img(img, 'img.png', (284, 216))
-# for i, id in enumerate([2, 13]):
-#     save_img(imgs[i], f'img.{id}.png', (284, 216))
-
-# v, f = pp3d.read_mesh('mesh.obj')
-# ps.init()
-# ps.register_surface_mesh('m', v, f)
-# ps.show()
 
 '''
 How to render a dmtet mesh
