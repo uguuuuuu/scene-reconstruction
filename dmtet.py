@@ -4,9 +4,9 @@
 
 import numpy as np
 import torch
-from enoki.cuda_autodiff import Vector3i as Vector3iD
+from enoki.cuda_autodiff import Vector3i as Vector3iD, Vector2f as Vector2fD, Vector3f as Vector3fD
 
-from utils import renderD
+from utils import renderDV
 
 ###############################################################################
 # Marching tetrahedrons implementation (differentiable), adapted from
@@ -195,11 +195,17 @@ class DMTetGeometry(torch.nn.Module):
         return verts, faces, uvs, uv_idx
 
     def forward(self, scene, key, integrator, sensor_ids):
-        v, f, _, _ = self.getMesh()
+        v, f, uvs, uv_idx = self.getMesh()
         print(v.shape)
         print(f.shape)
+        print(uvs.shape)
+        print(uv_idx.shape)
         scene.param_map[key].face_indices = Vector3iD(f.to(torch.int32))
-        return renderD({
+        scene.param_map[key].face_uv_indices = Vector3iD(uv_idx.to(torch.int32))
+        scene.param_map[key].vertex_positions = Vector3fD(v)
+        scene.param_map[key].vertex_uv = Vector2fD(uvs)
+        scene.param_map[key].configure()
+        return renderDV({
             'scene': scene,
             'key': key,
             'integrator': integrator,

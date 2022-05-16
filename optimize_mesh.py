@@ -1,12 +1,12 @@
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
+import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import sparse
 from igl import hausdorff
-import potpourri3d as pp3d
 from largesteps.parameterize import from_differential, to_differential
 from largesteps.geometry import compute_matrix
 from largesteps.optimize import AdamUniform
@@ -21,33 +21,25 @@ from utils import *
 '''
 Set up parameters
 '''
-target_name = 'bunny_env_largesteps'
-init_name = 'sphere_env_largesteps'
-n_sensors = 2
-# sensor_ids = [0, 2, 7, 9, 12, 14]
-# sensor_ids = [2, 3, 12, 13]
-sensor_ids = [2, 13]
-key = 'Mesh[0]'
-res = (284, 216)
-use_adam = False
-use_uniform = True # Use Largesteps' optimization method
-use_bilaplacian = False
-loss_fn = 'l1'
-start_itr = None # start from the latest saved tensor
-n_itr = 1000
-save_interval = 500
-lr = 1e-1
-lambda_ = 99 # Hyperparameter of the reparametrization matrix
-alpha = None # Hyperparameter of the reparametrization matrix
-l = 0. # Hyperparameter of the regularization loss
-if use_adam:
-    outdir = f'output/{target_name}/adam/sensors_{n_sensors}'
-elif l != 0.:
-    outdir = f'output/{target_name}/regularized/sensors_{n_sensors}'
-elif use_uniform:
-    outdir = f'output/{target_name}/uniform_adam/sensors_{n_sensors}'
+FLAGS = json.load(open('configs/bunny_env_largesteps.json', 'r'))
+n_sensors, sensor_ids = FLAGS['n_sensors'], FLAGS['sensor_ids']
+start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
+key = FLAGS['key']
+res = FLAGS['res']
+loss_fn = get_loss_fn(FLAGS['loss_fn'])
+lambda_, alpha = FLAGS['lambda'], FLAGS['alpha']
+if alpha == 0.: alpha = None
+lr = FLAGS['learning_rate']
+l = FLAGS['l']
+if FLAGS['optimizer'] == 'adam':
+    outdir = f"output/{FLAGS['name']}/adam/sensors_{FLAGS['n_sensors']}"
+elif FLAGS['l'] > 0.:
+    outdir = f"output/{FLAGS['name']}/regularized/sensors_{FLAGS['n_sensors']}"
+elif FLAGS['optimizer'] == 'uniform':
+    outdir = f"output/{FLAGS['name']}/uniform_adam/sensors_{FLAGS['n_sensors']}"
 else:
     raise NotImplementedError
+
 for i in range(n_sensors):
     os.makedirs(f'{outdir}/{sensor_ids[i]}', exist_ok=True)
 if start_itr != 0:
@@ -62,17 +54,17 @@ else:
 Record initial state 
 '''
 integrator = psdr_cuda.DirectIntegrator(bsdf_samples=2, light_samples=2)
-scene, ref_imgs = renderC_img(f'data/scenes/{target_name}.xml', integrator, sensor_ids, res)
+scene, ref_imgs = renderC_img(FLAGS['target_scene'], integrator, sensor_ids, res)
 for i, ref in enumerate(ref_imgs):
-    save_img(ref, f'{outdir}/ref_{sensor_ids[i]}.png', scene)
+    save_img(ref, f'{outdir}/ref_{sensor_ids[i]}.png', res)
     ref_imgs[i] = ref.torch()
 ref_imgs = torch.stack(ref_imgs)
 ref_v = scene.param_map[key].vertex_positions.numpy()
 ref_f = scene.param_map[key].face_indices.numpy()
 
-scene, init_imgs = renderC_img(f'data/scenes/{init_name}.xml', integrator, sensor_ids, res)
+scene, init_imgs = renderC_img(FLAGS['source_scene'], integrator, sensor_ids, res)
 for i, init in enumerate(init_imgs):
-    save_img(init, f'{outdir}/init_{sensor_ids[i]}.png', scene)
+    save_img(init, f'{outdir}/init_{sensor_ids[i]}.png', res)
 del init_imgs
 
 '''
@@ -86,7 +78,6 @@ with torch.no_grad():
     u: torch.Tensor = to_differential(M, v)
     laplacian = laplacian_uniform(v.shape[0], scene.param_map[key].face_indices)
     assert(laplacian.requires_grad == False)
-    loss_fn = get_loss_fn(loss_fn)
 
 u.requires_grad_()
 opt = AdamUniform([u], lr)
@@ -101,14 +92,14 @@ Training Loop
 '''
 for it in tqdm(range(start_itr, start_itr + n_itr)):
     v = from_differential(M, u, method='CG')
-    imgs = renderD({
+    imgs = renderDV({
             'scene': scene,
             'key': key,
             'integrator': integrator,
             'sensor_ids': sensor_ids
         }, v)
     for i, id in enumerate(sensor_ids):
-        save_img(imgs[i], f'{outdir}/{id}/train.{it+1:03}.png', scene)
+        save_img(imgs[i], f'{outdir}/{id}/train.{it+1:03}.png', res)
 
     img_loss = loss_fn(imgs, ref_imgs)
     loss = img_loss
@@ -145,9 +136,7 @@ with torch.no_grad():
     scene.configure()
     for i in sensor_ids:
         save_img(integrator.renderC(scene, sensor_id=i), f'{outdir}/itr{it+1}_{i}.png', scene)
-    v = scene.param_map[key].vertex_positions.numpy()
-    f = scene.param_map[key].face_indices.numpy()
-    pp3d.write_mesh(v, f, f'{outdir}/optimized_itr{it+1}_l{lambda_}_lr{lr}.obj')
+    scene.param_map[key].dump(f'{outdir}/optimized_itr{it+1}_l{lambda_}_lr{lr}.obj')
 
 '''
 Issues:
@@ -165,9 +154,10 @@ Observations:
     TODO
     - Add more scenes
     - Use gamma-corrected RGB colors in computing losses instead of linear ones
+    - Add mask loss
+    - Use scheduler during training
     - *Implement DMTet*
     - *Use DMTet to optimize a torus to a bunny*
-    - Add mask loss
     - *Jointly optimize shape and material (fit a diffuse bsdf first)*
         - implement or use a uv mapping algorithm (e.g. BFF, xatlas)
 '''

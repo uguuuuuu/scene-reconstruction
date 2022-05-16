@@ -11,33 +11,34 @@ from enoki.cuda_autodiff import Vector3f as Vector3fD, Float32 as FloatD
 from enoki.cuda import Vector3f as Vector3fC
 
 def linear2srgb(img):
-    shape = img.shape
-    img = img.flatten()
     img[img <= 0.0031308] *= 12.92
     img[img > 0.0031308] = 1.055*img[img > 0.0031308]**(1./2.4) - 0.055
     img = np.uint16(np.clip(img, 0., 1.)*65535)
-    return img.reshape(shape)
-
-def save_img(img, fname, scene):
-    i = 0.
-    if type(img) == Vector3fD or type(img) == Vector3fC:
-        i = img.numpy().reshape((scene.opts.height, scene.opts.width, 3))
-    else:
-        i = img.detach().cpu().numpy().reshape((scene.opts.height, scene.opts.width, 3))
-    i = cv2.cvtColor(i, cv2.COLOR_RGB2BGR)
-    if pathlib.Path(fname).suffix != '.exr':
-        i = linear2srgb(i)
-    cv2.imwrite(fname, i)
-
+    return img
+def srgb2linear(img):
+    img[img <= 0.04045] /= 12.92
+    img[img > 0.04045] = ((img[img > 0.04045]+0.055)/1.055)**2.4
+    return img
 def exr2png(fname):
     img = cv2.imread(fname,  cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
     img = linear2srgb(img)
     cv2.imwrite(str(pathlib.Path(fname).with_suffix('.png')), img)
 
+def save_img(img, fname, res: tuple):
+    i = 0.
+    if type(img) == Vector3fD or type(img) == Vector3fC:
+        i = img.numpy().reshape((res[1], res[0], 3))
+    else:
+        i = img.detach().cpu().numpy().reshape((res[1], res[0], 3))
+    i = cv2.cvtColor(i, cv2.COLOR_RGB2BGR)
+    if pathlib.Path(fname).suffix != '.exr':
+        i = linear2srgb(i)
+    cv2.imwrite(fname, i)
+
 class NotFoundError(Exception):
     def __init__(self, *args: object):
         super().__init__(*args)
-def load_tensor(pattern, n_itr = None):
+def load_tensor(pattern, n_itr = -1):
     '''
     Load a PyTorch tensor
 
@@ -52,7 +53,7 @@ def load_tensor(pattern, n_itr = None):
     if len(paths) == 0: return None, 0
     paths = [pathlib.Path(p) for p in paths]
 
-    if n_itr is None:
+    if n_itr == -1:
         path, itr = paths[0], int(paths[0].suffixes[-2][1:])
         for p in paths:
             itr = int(path.suffixes[-2][1:])
@@ -140,15 +141,9 @@ def regularization_loss(L: torch.Tensor, v: torch.Tensor, sqr = False):
         sqr: bool
             Whether to square L
     '''
-    if sqr:
-        # return 0.5 * l * torch.trace(torch.sparse.mm(v.transpose(0, 1), laplacian)
-        #                             @ torch.sparse.mm(laplacian, v))
-        return (L@v).square().mean()
-    else:
-        # return 0.5 * l * torch.trace(v.transpose(0, 1) @ torch.sparse.mm(laplacian, v))
-        return (v * (L@v)).mean()
+    return (L@v).square().mean() if sqr else (v * (L@v)).mean()
 
-class RenderD(torch.autograd.Function):
+class RenderD_Vert(torch.autograd.Function):
     @staticmethod
     def forward(ctx, params, v):
         assert(v.requires_grad)
@@ -177,7 +172,38 @@ class RenderD(torch.autograd.Function):
         del ctx.v, ctx.out
         # ek.cuda_malloc_trim()
         return (None, grad)
-renderD = RenderD.apply
+renderDV = RenderD_Vert.apply
+
+class RenderD_Mat(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, params, mat):
+        assert(mat.requires_grad)
+        scene, key, integrator, sensor_ids = \
+            [params[k] for k in ['scene', 'key', 'integrator', 'sensor_ids']]
+
+        ctx.mat = Vector3fD(mat)
+        ek.set_requires_gradient(ctx.mat)
+        scene.param_map[key].bsdf.reflectance.data = ctx.mat
+        scene.configure()
+        ctx.out = []
+        for id in sensor_ids:
+            ctx.out.append(integrator.renderD(scene, id))
+
+        out = torch.stack([img.torch() for img in ctx.out])
+        # ek.cuda_malloc_trim()
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        for i in range(len(ctx.out)):
+            ek.set_gradient(ctx.out[i], Vector3fC(grad_out[i]))
+        FloatD.backward()
+        grad = ek.gradient(ctx.mat).torch()
+
+        del ctx.mat, ctx.out
+        # ek.cuda_malloc_trim()
+        return (None, grad)
+renderDM = RenderD_Mat.apply
 
 class TimerError(Exception):
     def __init__(self, *args: object) -> None:
