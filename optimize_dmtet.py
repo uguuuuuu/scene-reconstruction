@@ -1,5 +1,4 @@
 import os
-from tabnanny import verbose
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 from tqdm import tqdm
@@ -18,9 +17,10 @@ from geometry import obj
 res = (284, 216)
 n_sensors = 2
 sensor_ids = [2, 13]
-outdir = f"output/opt-dmtet/spot_env"
+outdir = f"output/dmtet/spot_env"
 key = 'Mesh[0]'
-scene_file = 'data/scenes/spot_env.xml'
+target_scene = 'data/scenes/spot_env/spot_env.xml'
+source_scene = 'data/scenes/spot_env/spot_env_dmtet.xml'
 sdf_weight = 0.2
 lr = 0.01
 n_itr, start_itr, save_interval = 500, -1, 500
@@ -30,10 +30,10 @@ sdf, start_itr = load_tensor(f'{outdir}/sdf.*.pt', start_itr)
 deform, start_itr = load_tensor(f'{outdir}/deform.*.pt', start_itr)
 assert(not sdf.requires_grad if sdf is not None else True)
 assert(not deform.requires_grad if deform is not None else True)
-dmtet = DMTetGeometry(32, 2.1, sdf, deform)
+dmtet = DMTetGeometry(32, 1, sdf, deform)
 
 integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
-scene, ref_imgs = renderC_img(scene_file, integrator, sensor_ids, res)
+scene, ref_imgs = renderC_img(target_scene, integrator, sensor_ids, res)
 for i, ref in enumerate(ref_imgs):
     save_img(ref, f'{outdir}/ref_{sensor_ids[i]}.png', res)
     ref_imgs[i] = ref.torch()
@@ -41,14 +41,13 @@ ref_imgs = torch.stack(ref_imgs)
 ref_v = scene.param_map[key].vertex_positions.numpy()
 ref_f = scene.param_map[key].face_indices.numpy()
 
+m = dmtet.getMesh()
+obj.write_obj(f'{outdir}/mesh.obj', m)
 scene = psdr_cuda.Scene()
-scene.load_file(scene_file, False)
+scene.load_file(source_scene, False)
 scene.opts.spp = 32
 scene.opts.width = res[0]
 scene.opts.height = res[1]
-m = dmtet.getMesh()
-obj.write_obj(f'{outdir}/mesh.obj', m)
-scene.param_map[key].load(f'{outdir}/mesh.obj', verbose=True)
 scene.configure()
 init_imgs = [integrator.renderC(scene, id) for id in sensor_ids]
 for i, init in enumerate(init_imgs):
@@ -63,21 +62,20 @@ config.sensor_ids = sensor_ids
 img_losses = []
 reg_losses = []
 for it in tqdm(range(start_itr, start_itr + n_itr)):
+    m = dmtet.getMesh()
+    obj.write_obj(f'{outdir}/mesh.obj', m)
     scene = psdr_cuda.Scene()
-    scene.load_file(scene_file, False)
+    scene.load_file(source_scene, False)
     scene.opts.spp = 1
     scene.opts.width = res[0]
     scene.opts.height = res[1]
     scene.opts.log_level = 0
     config.scene = scene
-    m = dmtet.getMesh()
-    obj.write_obj(f'{outdir}/mesh.obj', m)
-    scene.param_map[key].load(f'{outdir}/mesh.obj')
-    # scene.param_map[key].load_mem(Vector3fD(m.v_pos), Vector3iD(m.t_pos_idx.to(torch.int32)))
 
     imgs = dmtet(renderDV)
     img_loss = functional.l1_loss(imgs, ref_imgs)
-    reg_loss: torch.Tensor = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() * sdf_weight
+    reg_loss: torch.Tensor = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() \
+        * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 5000))
     loss = img_loss + reg_loss
 
     opt.zero_grad()
@@ -98,14 +96,13 @@ plt.plot(reg_losses, label='SDF Regularization Loss')
 plt.legend()
 plt.savefig(f'{outdir}/losses.png')
 
+m = dmtet.getMesh()
+obj.write_obj(f'{outdir}/mesh.obj', m)
 scene = psdr_cuda.Scene()
-scene.load_file(scene_file, False)
+scene.load_file(source_scene, False)
 scene.opts.spp = 32
 scene.opts.width = 284
 scene.opts.height = 216
-m = dmtet.getMesh()
-obj.write_obj(f'{outdir}/mesh.obj', m)
-scene.param_map[key].load(f'{outdir}/mesh.obj', verbose=True)
 scene.configure()
 final_imgs = [integrator.renderC(scene, id) for id in sensor_ids]
 for i, img in enumerate(final_imgs):

@@ -2,6 +2,8 @@ from glob import glob
 import pathlib
 import time
 import cv2
+import imageio.v2 as iio
+from imageio.plugins import ffmpeg
 import torch
 from torch.nn import functional
 import numpy as np
@@ -9,7 +11,6 @@ import psdr_cuda
 import enoki as ek
 from enoki.cuda_autodiff import Vector3f as Vector3fD, Float32 as FloatD
 from enoki.cuda import Vector3f as Vector3fC
-import config
 
 def linear2srgb(img):
     img[img <= 0.0031308] *= 12.92
@@ -24,13 +25,28 @@ def exr2png(fname):
     img = cv2.imread(fname,  cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
     img = linear2srgb(img)
     cv2.imwrite(str(pathlib.Path(fname).with_suffix('.png')), img)
+def imgs2video(pattern, dst, fps):
+    ext = pathlib.Path(pattern).suffix
+    fnames = np.sort(glob(pattern))
+    w = iio.get_writer(dst, format='FFMPEG', mode='I', fps=fps)
+    if ext == '.exr':
+        for fname in fnames:
+            img = cv2.imread(fname,  cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = linear2srgb(img).astype(np.uint8)
+            w.append_data(img)
+    else:
+        for fname in fnames:
+            w.append_data(iio.imread(fname))
+    w.close()
 
 def save_img(img, fname, res: tuple):
-    i = 0.
     if type(img) == Vector3fD or type(img) == Vector3fC:
-        i = img.numpy().reshape((res[1], res[0], 3))
-    else:
-        i = img.detach().cpu().numpy().reshape((res[1], res[0], 3))
+        i = img.numpy()
+    elif type(img) == torch.Tensor:
+        i = img.detach().cpu().numpy()
+
+    i = i.reshape((res[1], res[0], i.shape[-1]))
     i = cv2.cvtColor(i, cv2.COLOR_RGB2BGR)
     if pathlib.Path(fname).suffix != '.exr':
         i = linear2srgb(i)
@@ -67,6 +83,11 @@ def load_tensor(pattern, n_itr = -1):
                 return torch.load(p), n_itr
         raise NotFoundError('No saved tensors matching the specified number of iteration')
             
+def transform(v: torch.Tensor, mat: torch.Tensor):
+    v = torch.cat([v, torch.ones([v.shape[0], 1], device='cuda')], dim=-1)
+    v = v @ mat.t()
+    v = v[:,:3] / v[:,3:]
+    return v
 
 def renderC_img(fname, integrator, sensor_ids, res = (256, 256), spp = 32):
     scene = psdr_cuda.Scene()
@@ -143,70 +164,6 @@ def regularization_loss(L: torch.Tensor, v: torch.Tensor, sqr = False):
             Whether to square L
     '''
     return (L@v).square().mean() if sqr else (v * (L@v)).mean()
-
-class RenderD_Vert(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, v):
-        assert(v.requires_grad)
-        scene, key, integrator, sensor_ids = \
-            config.scene, config.key, config.integrator, config.sensor_ids
-
-        ctx.v = Vector3fD(v)
-        ek.set_requires_gradient(ctx.v)
-        scene.param_map[key].vertex_positions = ctx.v
-        scene.configure()
-        ctx.out = [integrator.renderD(scene, id) for id in sensor_ids]
-
-        out = torch.stack([img.torch() for img in ctx.out])
-        # ek.cuda_malloc_trim()
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        for i in range(len(ctx.out)):
-            ek.set_gradient(ctx.out[i], Vector3fC(grad_out[i]))
-        FloatD.backward()
-
-        grad = ek.gradient(ctx.v)
-        nan_mask = ek.isnan(grad)
-        grad = ek.select(nan_mask, 0, grad).torch()
-
-        del ctx.v, ctx.out
-        # ek.cuda_malloc_trim()
-        return grad
-renderDV = RenderD_Vert.apply
-
-class RenderD_Mat(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, mat):
-        assert(mat.requires_grad)
-        scene, key, integrator, sensor_ids = \
-            config.scene, config.key, config.integrator, config.sensor_ids
-
-        ctx.mat = Vector3fD(mat)
-        ek.set_requires_gradient(ctx.mat)
-        scene.param_map[key].bsdf.reflectance.data = ctx.mat
-        scene.configure()
-        ctx.out = [integrator.renderD(scene, id) for id in sensor_ids]
-
-        out = torch.stack([img.torch() for img in ctx.out])
-        # ek.cuda_malloc_trim()
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        for i in range(len(ctx.out)):
-            ek.set_gradient(ctx.out[i], Vector3fC(grad_out[i]))
-        FloatD.backward()
-
-        grad = ek.gradient(ctx.mat)
-        nan_mask = ek.isnan(grad)
-        grad = ek.select(nan_mask, 0, grad).torch()
-
-        del ctx.mat, ctx.out
-        # ek.cuda_malloc_trim()
-        return grad
-renderDM = RenderD_Mat.apply
 
 class TimerError(Exception):
     def __init__(self, *args: object) -> None:
