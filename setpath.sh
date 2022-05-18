@@ -23,5 +23,6 @@ elif [ "$ZSH_VERSION" ]; then
     export RECON_DIR=$(dirname "$0:A")
 fi
 
+export PYTHONPATH="$RECON_DIR/ext/large-steps-pytorch/ext/botsch-kobbelt-remesher-libigl/build:$PYTHONPATH"
 export PYTHONPATH="$RECON_DIR/ext/enoki/build:$RECON_DIR/ext/psdr-cuda/build/lib:$PYTHONPATH"
 export LD_LIBRARY_PATH="$RECON_DIR/ext/enoki/build:$LD_LIBRARY_PATH"

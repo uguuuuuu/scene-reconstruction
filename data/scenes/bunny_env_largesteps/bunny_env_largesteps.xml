@@ -198,7 +198,7 @@
 
 <!-- Materials -->
 
-    <bsdf type="roughconductor" id="mat1">
+    <bsdf type="roughconductor" id="metal">
         <float name='alpha' value='0.05'/>
         <rgb name='eta' value='0.155475, 0.116753, 0.138334'/>
         <rgb name='k' value='4.83181, 3.12296, 2.14866'/>
@@ -220,12 +220,19 @@
 
 <!-- Shapes -->
 
-	<shape type="obj">
+	<shape type="obj" id="source">
+		<string name="filename" value="./data/meshes/sphere_2k.obj"/>
+		<transform name="to_world">
+			<scale x="0.6" y="0.6" z="0.6"/>
+			<translate x="0.575004" y="-0.397414" z="0.491954"/>
+		</transform>
+		<ref id="white"/>
+	</shape>
+	<shape type="obj" id="target">
 		<string name="filename" value="./data/meshes/bunny/bunny.obj"/>
 		<transform name="to_world">
 			<translate x="0.575004" y="-1.06555" z="0.262398"/>
 		</transform>
-		<!-- <ref id="mat1"/> -->
 		<ref id="white"/>
 	</shape>
 </scene>

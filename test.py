@@ -1,6 +1,7 @@
 import os
-import random
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
+import sys
+sys.path.append('ext/large-steps-pytorch/ext/botsch-kobbelt-remesher-libigl/build')
 
 import json
 import cv2
@@ -17,9 +18,29 @@ import potpourri3d as pp3d
 import polyscope as ps
 from torch.nn import functional
 import numpy as np
+import xml.etree.ElementTree as ET
 
-for i in range(1, 16):
-    imgs2video(f'output/bunny_env_largesteps/uniform_adam/sensors_16/train/{i}/train.*.png',
-            f'output/bunny_env_largesteps/uniform_adam/sensors_16/train/{i}/{i}.mp4', 30)
-    imgs2video(f'output/bunny_env_largesteps/uniform_adam/sensors_16/train/{i}/train_mask.*.exr',
-            f'output/bunny_env_largesteps/uniform_adam/sensors_16/train/{i}/{i}_mask.mp4', 30)
+# scene_xmls = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+sensor_ids = range(16)
+res = (284, 216)
+integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
+integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
+scene, ref_imgs = renderC_img('data/scenes/spot_env/spot_env.xml', integrator, sensor_ids, res, load_string=False)
+# _, ref_masks = renderC_img(scene_xmls['tgt_mask'], integrator_mask, sensor_ids, res)
+# for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
+#     ref_imgs[i] = img.torch()
+#     ref_masks[i] = mask.torch()
+# ref_imgs = torch.stack(ref_imgs)
+# ref_masks = torch.stack(ref_masks)
+
+v = scene.param_map['Mesh[0]'].vertex_positions.torch()
+f = scene.param_map['Mesh[0]'].face_indices.torch()
+m = remesh(v, f)
+obj.write_obj('mesh.obj', m)
+
+ps.init()
+
+ps.register_surface_mesh('original', v.cpu().numpy(), f.cpu().numpy())
+ps.register_surface_mesh('remeshed', m.v_pos.cpu().numpy(), m.t_pos_idx.cpu().numpy())
+
+ps.show()

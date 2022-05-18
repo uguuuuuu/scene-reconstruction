@@ -1,19 +1,17 @@
 {
     "name": "bunny_env_largesteps",
-    "source_scene": "data/scenes/bunny_env_largesteps/sphere_env_largesteps",
-    "target_scene": "data/scenes/bunny_env_largesteps/bunny_env_largesteps",
+    "scene": "data/scenes/bunny_env_largesteps/bunny_env_largesteps",
     "n_sensors": 16,
-    "sensor_ids": [],
     "batch_size": 2,
     "key": "Mesh[0]",
     "res": [284, 216],
-    "optimizer": "uniform",
     "loss_fn": "l1",
+    "tonemap": false,
     "start_itr": -1,
-    "n_itr": 500,
-    "save_interval": 500,
+    "n_itr": 750,
+    "save_interval": 250,
+    "remesh_itr": 500,
     "learning_rate": 0.05,
-    "lambda": 99,
-    "alpha": 0,
-    "l": 0
+    "lambda": 19,
+    "alpha": 0
 }
