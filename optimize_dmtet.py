@@ -1,109 +1,174 @@
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
+import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from igl import hausdorff
+import enoki as ek
 from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Vector3i as Vector3iD, Matrix4f as Matrix4fD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
 import torch
 from torch.optim import Adam
 from torch.nn import functional
+from torch.utils.data import DataLoader
 from utils import *
 import config
 from geometry.dmtet import DMTetGeometry, sdf_reg_loss
 from geometry import obj
+from dataset import DatasetMesh
+from loss import get_loss_fn
+from renderD import renderDVA
 
-res = (284, 216)
-n_sensors = 2
-sensor_ids = [2, 13]
-outdir = f"output/dmtet/spot_env"
-key = 'Mesh[0]'
-target_scene = 'data/scenes/spot_env/spot_env.xml'
-source_scene = 'data/scenes/spot_env/spot_env_dmtet.xml'
-sdf_weight = 0.2
-lr = 0.01
-n_itr, start_itr, save_interval = 500, -1, 500
+FLAGS = json.load(open('configs/bunny_env_largesteps_dmtet.json', 'r'))
+n_sensors, batch_size = FLAGS['n_sensors'], FLAGS['batch_size']
+sensor_ids = range(n_sensors)
+key = FLAGS['key']
+res = FLAGS['res']
+spp_ref, spp_opt = FLAGS['spp_ref'], FLAGS['spp_opt']
+loss_fn = get_loss_fn(FLAGS['loss_fn'], FLAGS['tonemap'])
+sdf_weight = FLAGS['sdf_weight']
+lr = FLAGS['learning_rate']
+start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
+outdir = f"output/{FLAGS['name']}"
+SDF_PATH = f'{outdir}/optimized/sdf.obj'
+scene_xmls = preprocess_scene(f"{FLAGS['scene']}.xml", sdf_path=SDF_PATH)
+
 for i in range(n_sensors):
-    os.makedirs(f'{outdir}/{sensor_ids[i]}', exist_ok=True)
-sdf, start_itr = load_tensor(f'{outdir}/sdf.*.pt', start_itr)
-deform, start_itr = load_tensor(f'{outdir}/deform.*.pt', start_itr)
-assert(not sdf.requires_grad if sdf is not None else True)
-assert(not deform.requires_grad if deform is not None else True)
-dmtet = DMTetGeometry(32, 1, sdf, deform)
+    os.makedirs(f'{outdir}/train/{sensor_ids[i]}', exist_ok=True)
+os.makedirs(f'{outdir}/stats', exist_ok=True)
+os.makedirs(f'{outdir}/ref', exist_ok=True)
+os.makedirs(f'{outdir}/optimized', exist_ok=True)
 
 integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
-scene, ref_imgs = renderC_img(target_scene, integrator, sensor_ids, res)
-for i, ref in enumerate(ref_imgs):
-    save_img(ref, f'{outdir}/ref_{sensor_ids[i]}.png', res)
-    ref_imgs[i] = ref.torch()
-ref_imgs = torch.stack(ref_imgs)
-ref_v = scene.param_map[key].vertex_positions.numpy()
-ref_f = scene.param_map[key].face_indices.numpy()
+integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
+scene, ref_imgs = renderC_img(scene_xmls['tgt'], integrator, sensor_ids, res, spp_ref)
+scene, ref_masks = renderC_img(scene_xmls['tgt_mask'], integrator_mask, sensor_ids, res, spp_ref)
+for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
+    save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
+    save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
+ref_v = transform_ek(scene.param_map[key].vertex_positions, scene.param_map[key].to_world).numpy()
+ref_f = scene.param_map[key].face_indices.numpy().astype(np.int64)
 
-m = dmtet.getMesh()
-obj.write_obj(f'{outdir}/mesh.obj', m)
-scene = psdr_cuda.Scene()
-scene.load_file(source_scene, False)
-scene.opts.spp = 32
-scene.opts.width = res[0]
-scene.opts.height = res[1]
-scene.configure()
-init_imgs = [integrator.renderC(scene, id) for id in sensor_ids]
-for i, init in enumerate(init_imgs):
-    save_img(init, f'{outdir}/init_{sensor_ids[i]}.png', res)
-del init_imgs
+if start_itr != 0:
+    sdf, start_itr = load_tensor(f'{outdir}/optimized/sdf.*.pt', start_itr)
+    deform, start_itr = load_tensor(f'{outdir}/optimized/deform.*.pt', start_itr)
+else:
+    sdf = deform = None
+dmtet = DMTetGeometry(32, 7, sdf, deform)
+obj.write_obj(SDF_PATH, dmtet.getMesh())
+scene, init_imgs = renderC_img(scene_xmls['sdf'], integrator, sensor_ids, res, 32)
+scene_mask, init_masks = renderC_img(scene_xmls['sdf_mask'], integrator_mask, sensor_ids, res, 32)
+for i, (img, mask) in enumerate(zip(init_imgs, init_masks)):
+    save_img(img, f'{outdir}/ref/init_{sensor_ids[i]}.png', res)
+    save_img(mask, f'{outdir}/ref/initmask_{sensor_ids[i]}.exr', res)
+del init_imgs, init_masks
+to_world = scene.param_map[key].to_world.numpy().squeeze()
 
+# ek.cuda_malloc_trim()
+ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
+ref_imgs = torch.stack([torch.from_numpy(mask).cuda() for mask in ref_masks])
+trainset = DatasetMesh(sensor_ids, ref_imgs, ref_masks)
 opt = Adam(dmtet.parameters(), lr)
 config.key = key
 config.integrator = integrator
-config.sensor_ids = sensor_ids
+config.integrator_mask = integrator_mask
 
-img_losses = []
-reg_losses = []
-for it in tqdm(range(start_itr, start_itr + n_itr)):
-    m = dmtet.getMesh()
-    obj.write_obj(f'{outdir}/mesh.obj', m)
-    scene = psdr_cuda.Scene()
-    scene.load_file(source_scene, False)
-    scene.opts.spp = 1
-    scene.opts.width = res[0]
-    scene.opts.height = res[1]
-    scene.opts.log_level = 0
-    config.scene = scene
+# def configure_scene():
+#     obj.write_obj(SDF_PATH, dmtet.getMesh())
+#     scene = psdr_cuda.Scene()
+#     scene.load_string(scene_xmls['sdf'], False)
+#     scene.opts.spp = spp_opt
+#     scene.opts.width = res[0]
+#     scene.opts.height = res[1]
+#     scene.opts.log_level = 0
+#     config.scene = scene
+#     scene_mask = psdr_cuda.Scene()
+#     scene_mask.load_string(scene_xmls['sdf_mask'], False)
+#     scene_mask.opts.spp = 1
+#     scene_mask.opts.width = res[0]
+#     scene_mask.opts.height = res[1]
+#     scene_mask.opts.log_level = 0
+#     config.scene_mask = scene_mask
+    
+# img_losses = []
+# mask_losses = []
+# reg_losses = []
+# distances = []
+# for it in tqdm(range(start_itr, start_itr + n_itr)):
+#     img_loss_ = mask_loss_ = reg_loss_ = 0.
+#     for ids, ref_imgs, ref_masks in DataLoader(trainset, batch_size, True):
+#         config.sensor_ids = ids
+#         configure_scene()
 
-    imgs = dmtet(renderDV)
-    img_loss = functional.l1_loss(imgs, ref_imgs)
-    reg_loss: torch.Tensor = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() \
-        * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 5000))
-    loss = img_loss + reg_loss
+#         imgs = dmtet(renderDVA)
 
-    opt.zero_grad()
-    loss.backward()
-    opt.step()
+#         img_loss = loss_fn(imgs[0], ref_imgs)
+#         mask_loss = functional.mse_loss(imgs[1], ref_masks)
+#         reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() \
+#             * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000))
+#         loss = img_loss + mask_loss + reg_loss
 
-    with torch.no_grad():
-        for i, img in enumerate(imgs):
-            save_img(img, f'{outdir}/{sensor_ids[i]}/train.{it+1:03}.png', res)
-        img_losses.append(img_loss.detach().cpu().numpy())
-        reg_losses.append(reg_loss.detach().cpu().numpy())
-        if (it+1)%save_interval == 0:
-            torch.save(dmtet.sdf.detach(), f'{outdir}/sdf.{it+1}.pt')
-            torch.save(dmtet.deform.detach(), f'{outdir}/deform.{it+1}.pt')
+#         opt.zero_grad()
+#         loss.backward()
+#         opt.step()
 
-plt.plot(img_losses, label='Image Loss')
-plt.plot(reg_losses, label='SDF Regularization Loss')
-plt.legend()
-plt.savefig(f'{outdir}/losses.png')
+#         with torch.no_grad():
+#             img_loss_ += img_loss
+#             mask_loss_ += mask_loss
+#             reg_loss_ += reg_loss
+#             if it % 2 == 0:
+#                 for i, id in enumerate(ids):
+#                     save_img(imgs[0][i], f'{outdir}/train/{id}/train.{it+1:04}.png', res)
+#                     save_img(imgs[1][i], f'{outdir}/train/{id}/train_mask.{it+1:04}.exr', res)
 
-m = dmtet.getMesh()
-obj.write_obj(f'{outdir}/mesh.obj', m)
-scene = psdr_cuda.Scene()
-scene.load_file(source_scene, False)
-scene.opts.spp = 32
-scene.opts.width = 284
-scene.opts.height = 216
-scene.configure()
-final_imgs = [integrator.renderC(scene, id) for id in sensor_ids]
-for i, img in enumerate(final_imgs):
-    save_img(img, f'{outdir}/itr{it+1}_{sensor_ids[i]}.png', res)
+#     m = dmtet.getMesh()
+#     with torch.no_grad():
+#         if (it+1)%save_interval == 0:
+#             torch.save(dmtet.sdf.detach(), f'{outdir}/optimized/sdf.{it+1}.pt')
+#             torch.save(dmtet.deform.detach(), f'{outdir}/optimized/deform.{it+1}.pt')
+#         img_losses.append(img_loss_.cpu().numpy())
+#         mask_losses.append(mask_loss_.cpu().numpy())
+#         reg_losses.append(reg_loss_.cpu().numpy())
+#         distances.append(hausdorff(transform_np(m.v_pos.cpu().numpy(), to_world),
+#                 m.t_pos_idx.cpu().numpy(), ref_v, ref_f))
+
+# plt.plot(img_losses, label='Image Loss')
+# plt.plot(mask_losses, label='Mask Loss')
+# plt.plot(reg_losses, label='SDF Regularization Loss')
+# plt.yscale('log')
+# plt.legend()
+# plt.savefig(f'{outdir}/stats/losses_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
+# plt.close()
+# plt.plot(distances)
+# plt.ylabel("Hausdorff Distance")
+# plt.savefig(f'{outdir}/stats/distances_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
+
+# obj.write_obj(SDF_PATH, dmtet.getMesh())
+# scene, opt_imgs = renderC_img(scene_xmls['sdf'], integrator, sensor_ids, res, spp_ref)
+# scene_mask, opt_masks = renderC_img(scene_xmls['sdf_mask'], integrator_mask, sensor_ids, res, spp_ref)
+# for i, (img, mask) in enumerate(zip(opt_imgs, opt_masks)):
+#     save_img(img, f'{outdir}/optimized/itr{it+1}_{i}.png', res)
+#     save_img(mask, f'{outdir}/optimized/itr{it+1}_{i}_mask.exr', res)
+# scene.param_map[key].dump(f'{outdir}/optimized/optimized_itr{it+1}_lr{lr}_weight{sdf_weight}.obj')
+
+# for id in sensor_ids:
+#     imgs2video(f"{outdir}/train/{id}/train.*.png", f"{outdir}/train/{id}.mp4", 10)
+#     imgs2video(f"{outdir}/train/{id}/train_mask.*.exr", f"{outdir}/train/{id}_mask.mp4", 10)
+
+'''
+Notes:
+    - After the first 100 iterations, the surface does not change much
+    during the following optimization (trapped in a local minimum)
+        - Increase the res of the tet grid (too costly)
+        - Increase spp
+            - Significantly improved the reconstructed geometry
+        - Increase res of images
+'''
+
+'''
+TODO
+    - Optimize code to allow for higher image resolutions
+        - highest memory consumption: 4437
+'''

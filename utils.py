@@ -7,7 +7,8 @@ import imageio.v2 as iio
 import torch
 import numpy as np
 import psdr_cuda
-from enoki.cuda_autodiff import Vector3f as Vector3fD, Float32 as FloatD
+import enoki as ek
+from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Vector4f as Vector4fD
 from enoki.cuda import Vector3f as Vector3fC
 from pyremesh import remesh_botsch
 from geometry.mesh import Mesh, auto_normals
@@ -42,15 +43,15 @@ def imgs2video(pattern, dst, fps):
 
 def save_img(img, fname, res: tuple):
     if type(img) == Vector3fD or type(img) == Vector3fC:
-        i = img.numpy()
+        img = img.numpy()
     elif type(img) == torch.Tensor:
-        i = img.detach().cpu().numpy()
+        img = img.detach().cpu().numpy()
 
-    i = i.reshape((res[1], res[0], i.shape[-1]))
-    i = cv2.cvtColor(i, cv2.COLOR_RGB2BGR)
+    img = img.reshape((res[1], res[0], img.shape[-1]))
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     if pathlib.Path(fname).suffix != '.exr':
-        i = linear2srgb(i)
-    cv2.imwrite(fname, i)
+        img = linear2srgb(img)
+    cv2.imwrite(fname, img)
 
 class NotFoundError(Exception):
     def __init__(self, *args: object):
@@ -83,49 +84,65 @@ def load_tensor(pattern, n_itr = -1):
                 return torch.load(p), n_itr
         raise NotFoundError('No saved tensors matching the specified number of iteration')
 
-def preprocess_scene(fname, remesh_path=None):
+def preprocess_scene(fname, remesh_path=None, sdf_path=None):
     def remove_elem(parent, tag):
         for elem in parent.findall(tag):
             parent.remove(elem)
         for elem in parent:
             remove_elem(elem, tag)
+    def find_id(parent, id):
+        for elem in parent:
+            if elem.get('id') == id:
+                return (parent, elem)
+        for elem in parent:
+            a = find_id(elem, id)
+            if a is not None:
+                return a
+    def replace_filename(elem, fname):
+        for string in elem.findall('string'):
+            if string.get('name') == 'filename':
+                old_fname = string.attrib['value']
+                string.attrib['value'] = fname
+                return old_fname
 
+    '''
+    Construct source scenes
+    '''
     tree = ET.parse(fname); root = tree.getroot()
-    for shape in root.findall('shape'):
-        try:
-            if shape.attrib['id'] == 'target':
-                root.remove(shape)
-            elif shape.attrib['id'] == 'source':
-                source_shape = shape
-        except KeyError:
-            continue
+    p = find_id(root, 'target')
+    p[0].remove(p[1])
+    p, source_shape = find_id(root, 'source')
     source_scene = ET.tostring(root, encoding='unicode')
 
+    source_filename = replace_filename(source_shape, '')
     remesh_scene = None
     if remesh_path is not None:
-        for string in source_shape.findall('string'):
-            if string.attrib['name'] == 'filename':
-                filename_tag = string
-                source_filename = string.attrib['value']
-                string.attrib['value'] = remesh_path
+        replace_filename(source_shape, remesh_path)
         remesh_scene = ET.tostring(root, encoding='unicode')
-        filename_tag.attrib['value'] = source_filename
+    sdf_scene = None
+    if sdf_path is not None:
+        replace_filename(source_shape, sdf_path)
+        sdf_scene = ET.tostring(root, encoding='unicode')
+    replace_filename(source_shape, source_filename)
 
     remove_elem(root, 'emitter')
     source_mask = ET.tostring(root, encoding='unicode')
 
     remesh_mask = None
     if remesh_path is not None:
-        filename_tag.attrib['value'] = remesh_path
+        replace_filename(source_shape, remesh_path)
         remesh_mask = ET.tostring(root, encoding='unicode')
+    sdf_mask = None
+    if sdf_path is not None:
+        replace_filename(source_shape, sdf_path)
+        sdf_mask = ET.tostring(root, encoding='unicode')
 
+    '''
+    Construct target scenes
+    '''
     tree = ET.parse(fname); root = tree.getroot()
-    for shape in root.findall('shape'):
-        try:
-            if shape.attrib['id'] == 'source':
-                root.remove(shape)
-        except KeyError:
-            continue
+    p = find_id(root, 'source')
+    p[0].remove(p[1])
     target_scene = ET.tostring(root, encoding='unicode')
     remove_elem(root, 'emitter')
     target_mask = ET.tostring(root, encoding='unicode')
@@ -134,14 +151,26 @@ def preprocess_scene(fname, remesh_path=None):
         'src': source_scene,
         'tgt': target_scene,
         'rm': remesh_scene,
+        'sdf': sdf_scene,
         'src_mask': source_mask,
         'tgt_mask': target_mask,
-        'rm_mask': remesh_mask
+        'rm_mask': remesh_mask,
+        'sdf_mask': sdf_mask
     }
             
 def transform(v: torch.Tensor, mat: torch.Tensor):
     v = torch.cat([v, torch.ones([v.shape[0], 1], device='cuda')], dim=-1)
     v = v @ mat.t()
+    v = v[:,:3] / v[:,3:]
+    return v
+def transform_ek(v, mat):
+    v = Vector4fD(v.x, v.y, v.z, 1.)
+    v = mat @ v
+    v = Vector3fD(v.x, v.y, v.z) / FloatD(v.w)
+    return v
+def transform_np(v, mat):
+    v = np.concatenate([v, np.ones((v.shape[0], 1))], axis=-1)
+    v = v @ mat.transpose()
     v = v[:,:3] / v[:,3:]
     return v
 
@@ -151,12 +180,14 @@ def renderC_img(xml, integrator, sensor_ids, res = (256, 256), spp = 32, load_st
     scene.opts.width = res[0]
     scene.opts.height = res[1]
     scene.opts.spp = spp
+    scene.opts.sppe = scene.opts.sppse = 0
     scene.opts.log_level = 0
     scene.configure()
     imgs = []
     for i in sensor_ids:
         img = integrator.renderC(scene, sensor_id=i)
-        imgs.append(img)
+        imgs.append(img.numpy())
+        ek.cuda_malloc_trim()
     return scene, imgs
 
 '''

@@ -20,27 +20,11 @@ from torch.nn import functional
 import numpy as np
 import xml.etree.ElementTree as ET
 
-# scene_xmls = preprocess_scene('data/scenes/spot_env/spot_env.xml')
-sensor_ids = range(16)
-res = (284, 216)
-integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
-integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
-scene, ref_imgs = renderC_img('data/scenes/spot_env/spot_env.xml', integrator, sensor_ids, res, load_string=False)
-# _, ref_masks = renderC_img(scene_xmls['tgt_mask'], integrator_mask, sensor_ids, res)
-# for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
-#     ref_imgs[i] = img.torch()
-#     ref_masks[i] = mask.torch()
-# ref_imgs = torch.stack(ref_imgs)
-# ref_masks = torch.stack(ref_masks)
-
-v = scene.param_map['Mesh[0]'].vertex_positions.torch()
-f = scene.param_map['Mesh[0]'].face_indices.torch()
-m = remesh(v, f)
-obj.write_obj('mesh.obj', m)
-
-ps.init()
-
-ps.register_surface_mesh('original', v.cpu().numpy(), f.cpu().numpy())
-ps.register_surface_mesh('remeshed', m.v_pos.cpu().numpy(), m.t_pos_idx.cpu().numpy())
-
-ps.show()
+v = np.array([
+    [1., 2., 3.],
+    [4., 5., 6.]
+])
+mat = Matrix4fD.translate(Vector3fD(2., 3., 4.)).numpy().squeeze()
+print(v)
+v = transform_np(v, mat)
+print(v)

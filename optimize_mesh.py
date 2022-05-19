@@ -157,6 +157,8 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             scene_mask.opts.spp = 1
             config.scene = scene
             config.scene_mask = scene_mask
+            lambda_ = 99
+            lr /= 5
             v = scene.param_map[key].vertex_positions.torch()
             M = compute_matrix(v, scene.param_map[key].face_indices.torch(), lambda_, alpha=alpha)
             u: torch.Tensor = to_differential(M, v)
@@ -197,13 +199,16 @@ Issues:
     - When the material is highly specular, maybe need to add mask loss (since the surface
     is similar to the background in terms of the pixel values)
     - The optimized mesh is smooth but lacks geometric details
-        - Lower lambda_
-        - Remesh
-        - Increase resolution and spp
+        - Lower lambda_ (19 works well for the initial mesh)
+        - Remesh periodically (also configure hyperparamters accordingly)
+            - Try start remeshing at iteration 250 (instead of 500)
+        - *Increase resolution and spp*
     - Remeshing results in the following optimization causing entangled geometry
         - Increase lambda_ after remeshing
         - Decrease the learning rate after remeshing
         - Increase spp
+    - Remeshing loses UVs (causing problems when jointly optimizing geometry and materials)
+        - Look up instant meshes
 '''
 
 '''
@@ -227,7 +232,10 @@ Observations:
         - Obtain mask images for real-world input images (using Detectron2 for example)
     - Use scheduler during training
         - try to use exponential falloff
+    - Try real-world images
+    - *Implement upsampling and downsampling remesh algorithms*
     - *Implement the two-stage pipeline to optimize geometry*
     - *Jointly optimize shape and material (fit a diffuse bsdf first)*
         - implement or use a uv mapping algorithm (e.g. BFF, xatlas)
+        - remesh and upsample textures periodically during optimization
 '''

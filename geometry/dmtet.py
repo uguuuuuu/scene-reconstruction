@@ -170,11 +170,11 @@ class DMTetGeometry(torch.nn.Module):
         # Random init
         if sdf is None: sdf = torch.rand_like(self.verts[:,0]) - 0.1
         assert(sdf.shape[0] == self.verts.shape[0])
-        self.sdf    = torch.nn.Parameter(sdf.clone().detach(), requires_grad=True)
+        self.sdf = torch.nn.Parameter(sdf, requires_grad=True)
         self.register_parameter('sdf', self.sdf)
 
-        self.deform = torch.nn.Parameter(torch.zeros_like(self.verts) if deform is None else deform.clone().detach(),
-                                    requires_grad=True)
+        if deform is None: deform = torch.zeros_like(self.verts)
+        self.deform = torch.nn.Parameter(deform, requires_grad=True)
         assert(self.deform.shape == self.verts.shape)
         self.register_parameter('deform', self.deform)
 
@@ -193,6 +193,7 @@ class DMTetGeometry(torch.nn.Module):
 
     def getMesh(self):
         if self.mesh_cache is not None: return self.mesh_cache
+
         # Run DM tet to get a base mesh
         v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
         verts, faces, uvs, uv_idx = self.marching_tets(v_deformed, self.sdf, self.indices)
@@ -206,7 +207,7 @@ class DMTetGeometry(torch.nn.Module):
         return imesh
 
     def forward(self, render_fn):
-        m = self.getMesh() if self.mesh_cache is None else self.mesh_cache
+        m = self.getMesh()
         imgs = render_fn(m.v_pos)
         self.mesh_cache = None
         return imgs
