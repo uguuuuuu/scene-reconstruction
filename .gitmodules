@@ -1,9 +1,6 @@
 [submodule "ext/large-steps-pytorch"]
 	path = ext/large-steps-pytorch
 	url = git@github.com:uguuuuuu/large-steps-pytorch.git
-[submodule "ext/psdr-cuda"]
-	path = ext/psdr-cuda
-	url = https://github.com/uguuuuuu/psdr-cuda.git
 [submodule "ext/enoki"]
 	path = ext/enoki
 	url = https://github.com/mitsuba-renderer/enoki.git
