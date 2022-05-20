@@ -4,6 +4,3 @@
 [submodule "ext/enoki"]
 	path = ext/enoki
 	url = https://github.com/mitsuba-renderer/enoki.git
-[submodule "ext/psdr-cuda"]
-	path = ext/psdr-cuda
-	url = https://github.com/uguuuuuu/psdr-cuda.git
