@@ -4,7 +4,7 @@
     "key": "Mesh[0]",
     "n_sensors": 16,
     "batch_size": 2,
-    "res": [288, 162],
+    "res": [320, 180],
     "spp_ref": 128,
     "spp_opt": 1,
     "loss_fn": "l1",

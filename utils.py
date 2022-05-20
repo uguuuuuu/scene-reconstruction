@@ -174,6 +174,10 @@ def transform_np(v, mat):
     v = v[:,:3] / v[:,3:]
     return v
 
+def flip_uv(uv):
+    uv = uv.clone()
+    uv[:,1] = 1. - uv[:,1]
+    return uv
 def renderC_img(xml, integrator, sensor_ids, res = (256, 256), spp = 32, load_string=True):
     scene = psdr_cuda.Scene()
     scene.load_string(xml, False) if load_string else scene.load_file(xml, False)

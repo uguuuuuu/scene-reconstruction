@@ -1,7 +1,6 @@
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 import sys
-sys.path.append('ext/large-steps-pytorch/ext/botsch-kobbelt-remesher-libigl/build')
 
 import json
 import cv2
@@ -20,11 +19,31 @@ from torch.nn import functional
 import numpy as np
 import xml.etree.ElementTree as ET
 
-v = np.array([
-    [1., 2., 3.],
-    [4., 5., 6.]
-])
-mat = Matrix4fD.translate(Vector3fD(2., 3., 4.)).numpy().squeeze()
-print(v)
-v = transform_np(v, mat)
-print(v)
+res = (320, 180)
+integrator = psdr_cuda.DirectIntegrator(1, 1)
+scene = psdr_cuda.Scene()
+scene.load_file('example.xml', False)
+scene.opts.width = res[0]
+scene.opts.height = res[1]
+scene.opts.spp = 32
+# scene.configure()
+
+# img = integrator.renderC(scene, 2)
+# save_img(img, 'img.png', res)
+
+dmtet = DMTetGeometry(32, 4)
+tet_mesh = dmtet.getMesh()
+v = Vector3fD(tet_mesh.v_pos)
+f = Vector3iD(tet_mesh.t_pos_idx.to(torch.int32))
+# uv = Vector2fD(tet_mesh.v_tex)
+# uv_idx = Vector3iD(tet_mesh.t_tex_idx.to(torch.int32))
+print(tet_mesh.v_pos.shape)
+print(tet_mesh.t_pos_idx.shape)
+print(tet_mesh.v_tex.shape)
+print(tet_mesh.t_tex_idx.shape)
+# m = scene.param_map['Mesh[0]']
+# scene.reload_mesh_mem(m, v, f, uv, uv_idx)
+# scene.configure()
+
+# img = integrator.renderC(scene, 2)
+# save_img(img, 'img1.png', res)

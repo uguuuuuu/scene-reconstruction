@@ -222,16 +222,12 @@
 
 	<shape type="obj" id="source">
 		<string name="filename" value="./data/meshes/sphere_2k.obj"/>
-		<transform name="to_world">
-			<scale x="0.6" y="0.6" z="0.6"/>
-			<translate x="0.575004" y="-0.397414" z="0.491954"/>
-		</transform>
 		<ref id="white"/>
 	</shape>
 	<shape type="obj" id="target">
 		<string name="filename" value="./data/meshes/bunny/bunny.obj"/>
 		<transform name="to_world">
-			<translate x="0.575004" y="-1.06555" z="0.262398"/>
+			<translate x="0.571032" y="-1.05297" z="0.24338"/>
 		</transform>
 		<ref id="white"/>
 	</shape>
