@@ -12,7 +12,7 @@ import enoki as ek
 from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Matrix4f as Matrix4fD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
-from utils import *
+from util import *
 
 FLAGS = json.load(open('configs/spot_env.json', 'r'))
 n_sensors, sensor_ids = FLAGS['n_sensors'], FLAGS['sensor_ids']

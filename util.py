@@ -6,12 +6,10 @@ import cv2
 import imageio.v2 as iio
 import torch
 import numpy as np
-import psdr_cuda
 import enoki as ek
-from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Vector4f as Vector4fD
+from enoki.cuda_autodiff import Vector3f as Vector3fD
 from enoki.cuda import Vector3f as Vector3fC
-from pyremesh import remesh_botsch
-from geometry.mesh import Mesh, auto_normals
+from render.scene import Scene
 
 def linear2srgb(img):
     img[img <= 0.0031308] *= 12.92
@@ -52,6 +50,10 @@ def save_img(img, fname, res: tuple):
     if pathlib.Path(fname).suffix != '.exr':
         img = linear2srgb(img)
     cv2.imwrite(fname, img)
+
+def xmlfile2str(fname):
+    tree = ET.parse(fname)
+    return ET.tostring(tree.getroot(), encoding='unicode')
 
 class NotFoundError(Exception):
     def __init__(self, *args: object):
@@ -104,6 +106,8 @@ def preprocess_scene(fname, remesh_path=None, sdf_path=None):
                 old_fname = string.attrib['value']
                 string.attrib['value'] = fname
                 return old_fname
+    def num_of(parent, tag):
+        return len(parent.findall(tag))
 
     '''
     Construct source scenes
@@ -125,167 +129,35 @@ def preprocess_scene(fname, remesh_path=None, sdf_path=None):
         sdf_scene = ET.tostring(root, encoding='unicode')
     replace_filename(source_shape, source_filename)
 
-    remove_elem(root, 'emitter')
-    source_mask = ET.tostring(root, encoding='unicode')
-
-    remesh_mask = None
-    if remesh_path is not None:
-        replace_filename(source_shape, remesh_path)
-        remesh_mask = ET.tostring(root, encoding='unicode')
-    sdf_mask = None
-    if sdf_path is not None:
-        replace_filename(source_shape, sdf_path)
-        sdf_mask = ET.tostring(root, encoding='unicode')
-
     '''
-    Construct target scenes
+    Construct target scene
     '''
     tree = ET.parse(fname); root = tree.getroot()
     p = find_id(root, 'source')
     p[0].remove(p[1])
     target_scene = ET.tostring(root, encoding='unicode')
-    remove_elem(root, 'emitter')
-    target_mask = ET.tostring(root, encoding='unicode')
 
     return {
         'src': source_scene,
         'tgt': target_scene,
         'rm': remesh_scene,
         'sdf': sdf_scene,
-        'src_mask': source_mask,
-        'tgt_mask': target_mask,
-        'rm_mask': remesh_mask,
-        'sdf_mask': sdf_mask
+        'n_sensors': num_of(root, 'sensor')
     }
-            
-def transform(v: torch.Tensor, mat: torch.Tensor):
-    v = torch.cat([v, torch.ones([v.shape[0], 1], device='cuda')], dim=-1)
-    v = v @ mat.t()
-    v = v[:,:3] / v[:,3:]
-    return v
-def transform_ek(v, mat):
-    v = Vector4fD(v.x, v.y, v.z, 1.)
-    v = mat @ v
-    v = Vector3fD(v.x, v.y, v.z) / FloatD(v.w)
-    return v
-def transform_np(v, mat):
-    v = np.concatenate([v, np.ones((v.shape[0], 1))], axis=-1)
-    v = v @ mat.transpose()
-    v = v[:,:3] / v[:,3:]
-    return v
 
 def flip_uv(uv):
     uv = uv.clone()
     uv[:,1] = 1. - uv[:,1]
     return uv
-def renderC_img(xml, integrator, sensor_ids, res = (256, 256), spp = 32, load_string=True):
-    scene = psdr_cuda.Scene()
-    scene.load_string(xml, False) if load_string else scene.load_file(xml, False)
-    scene.opts.width = res[0]
-    scene.opts.height = res[1]
-    scene.opts.spp = spp
-    scene.opts.sppe = scene.opts.sppse = 0
-    scene.opts.log_level = 0
-    scene.configure()
-    imgs = []
-    for i in sensor_ids:
-        img = integrator.renderC(scene, sensor_id=i)
-        imgs.append(img.numpy())
-        ek.cuda_malloc_trim()
+
+def renderC_img(xml, integrator, sensor_ids = None, res = (256, 256), spp = 32, load_string=True):
+    if load_string == False: xml = xmlfile2str(xml)
+    scene = Scene(xml)
+    scene.set_opts(res, spp, sppe=0, sppse=0)
+    scene.prepare()
+    imgs = scene.renderC(integrator, sensor_ids)
+    assert(imgs is not None)
     return scene, imgs
-
-'''
-    Adapted from the "Large Steps in Inverse Rendering of Geometry" paper
-    https://rgl.epfl.ch/publications/Nicolet2021Large
-'''
-def laplacian_uniform(V, faces):
-    """
-    Compute the uniform Laplacian
-
-    Parameters
-    ----------
-    V : scalar
-        Number of vertices.
-    faces : torch.Tensor
-        array of triangle faces.
-    """
-
-    # Neighbor indices
-    ii = faces[:, [1, 2, 0]].flatten()
-    jj = faces[:, [2, 0, 1]].flatten()
-    adj = torch.stack([torch.cat([ii, jj]), torch.cat([jj, ii])], dim=0).unique(dim=1)
-    adj_values = torch.ones(adj.shape[1], device='cuda', dtype=torch.float)
-
-    # Diagonal indices
-    diag_idx = adj[0]
-
-    # Build the sparse matrix
-    idx = torch.cat((adj, torch.stack((diag_idx, diag_idx), dim=0)), dim=1)
-    values = torch.cat((-adj_values, adj_values))
-
-    # The coalesce operation sums the duplicate indices, resulting in the
-    # correct diagonal
-    return torch.sparse_coo_tensor(idx, values, (V,V)).coalesce()
-def regularization_loss(L: torch.Tensor, v: torch.Tensor, sqr = False):
-    '''
-        Compute the Laplacian regularization term
-
-        Parameters
-        ----------
-        L : torch.Tensor
-            Uniform Laplacian 
-        v : torch.Tensor
-            Vertex positions
-        sqr: bool
-            Whether to square L
-    '''
-    return (L@v).square().mean() if sqr else (v * (L@v)).mean()
-def remove_duplicates(v, f):
-    """
-    Generate a mesh representation with no duplicates and
-    return it along with the mapping to the original mesh layout.
-    """
-
-    unique_verts, inverse = torch.unique(v, dim=0, return_inverse=True)
-    new_faces = inverse[f.long()]
-    return unique_verts, new_faces, inverse
-
-def average_edge_length(verts, faces):
-    """
-    Compute the average length of all edges in a given mesh.
-
-    Parameters
-    ----------
-    verts : torch.Tensor
-        Vertex positions.
-    faces : torch.Tensor
-        array of triangle faces.
-    """
-    face_verts = verts[faces.long()]
-    v0, v1, v2 = face_verts[:, 0], face_verts[:, 1], face_verts[:, 2]
-
-    # Side lengths of each triangle, of shape (sum(F_n),)
-    # A is the side opposite v1, B is opposite v2, and C is opposite v3
-    A = (v1 - v2).norm(dim=1)
-    B = (v0 - v2).norm(dim=1)
-    C = (v0 - v1).norm(dim=1)
-
-    return (A + B + C).sum() / faces.shape[0] / 3
-'''
-'''
-
-@torch.no_grad()
-def remesh(v: torch.Tensor, f: torch.Tensor):
-    h = average_edge_length(v, f).cpu().numpy() / 2
-    v_ = v.detach().cpu().numpy().astype(np.double)
-    f_ = f.cpu().numpy().astype(np.int32)
-    v_, f_ = remesh_botsch(v_, f_, 5, h, True)
-    v_ = torch.from_numpy(v_).float().cuda().contiguous()
-    f_ = torch.from_numpy(f_).cuda().contiguous()
-    v_, f_, _ = remove_duplicates(v_, f_)
-    m = Mesh(v_, f_)
-    m = auto_normals(m)
-    return m
 
 class TimerError(Exception):
     def __init__(self, *args: object) -> None:

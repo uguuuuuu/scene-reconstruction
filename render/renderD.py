@@ -3,7 +3,7 @@ from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Vector
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC
 import torch
 
-import config
+from . import config
 
 class RenderD_Vert(torch.autograd.Function):
     @staticmethod
@@ -41,7 +41,7 @@ class RenderD_Vert_Alpha(torch.autograd.Function):
     @staticmethod
     def forward(ctx, v):
         assert(v.requires_grad)
-        scene, scene_mask = config.scene, config.scene_mask
+        scene = config.scene
         integrator, integrator_mask =  config.integrator, config.integrator_mask
         key, sensor_ids = config.key, config.sensor_ids
 
@@ -49,10 +49,8 @@ class RenderD_Vert_Alpha(torch.autograd.Function):
         ek.set_requires_gradient(ctx.v)
         scene.param_map[key].vertex_positions = ctx.v
         scene.configure()
-        scene_mask.param_map[key].vertex_positions = ctx.v
-        scene_mask.configure()
         ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
-        ctx.masks = [integrator_mask.renderD(scene_mask, id) for id in sensor_ids]
+        ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
 
         imgs = torch.stack([img.torch() for img in ctx.imgs])
         masks = torch.stack([mask.torch() for mask in ctx.masks])

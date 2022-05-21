@@ -15,11 +15,11 @@ from torch.utils.data import DataLoader
 from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Matrix4f as Matrix4fD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
-from utils import *
-from loss import get_loss_fn
-from renderD import renderDVA
+from util import *
+from render.loss import get_loss_fn
+from render.renderD import renderDVA
 from dataset import DatasetMesh
-import config
+import render.config as config
 from geometry import obj
 
 '''

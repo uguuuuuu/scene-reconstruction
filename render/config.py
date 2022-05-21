@@ -1,5 +1,4 @@
 scene = None
-scene_mask = None
 key = None
 integrator = None
 integrator_mask = None

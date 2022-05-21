@@ -51,37 +51,6 @@ class DMTet:
 
         return torch.stack([a, b],-1)
 
-    def map_uv(self, faces, face_gidx, max_idx):
-        N = int(np.ceil(np.sqrt((max_idx+1)//2)))
-        tex_y, tex_x = torch.meshgrid(
-            torch.linspace(0, 1 - (1 / N), N, dtype=torch.float32, device="cuda"),
-            torch.linspace(0, 1 - (1 / N), N, dtype=torch.float32, device="cuda"),
-            indexing='ij'
-        )
-
-        pad = 0.9 / N
-
-        uvs = torch.stack([
-            tex_x      , tex_y,
-            tex_x + pad, tex_y,
-            tex_x + pad, tex_y + pad,
-            tex_x      , tex_y + pad
-        ], dim=-1).view(-1, 2)
-
-        def _idx(tet_idx, N):
-            x = tet_idx % N
-            y = torch.div(tet_idx, N, rounding_mode='trunc')
-            return y * N + x
-
-        tet_idx = _idx(torch.div(face_gidx, 2, rounding_mode='trunc'), N)
-        tri_idx = face_gidx % 2
-
-        uv_idx = torch.stack((
-            tet_idx * 4, tet_idx * 4 + tri_idx + 1, tet_idx * 4 + tri_idx + 2
-        ), dim = -1). view(-1, 3)
-
-        return uvs, uv_idx
-
     ###############################################################################
     # Marching tets implementation
     ###############################################################################
@@ -127,17 +96,7 @@ class DMTet:
             torch.gather(input=idx_map[num_triangles == 2], dim=1, index=self.triangle_table[tetindex[num_triangles == 2]][:, :6]).reshape(-1,3),
         ), dim=0)
 
-        # Get global face index (static, does not depend on topology)
-        num_tets = tet_fx4.shape[0]
-        tet_gidx = torch.arange(num_tets, dtype=torch.long, device="cuda")[valid_tets]
-        face_gidx = torch.cat((
-            tet_gidx[num_triangles == 1]*2,
-            torch.stack((tet_gidx[num_triangles == 2]*2, tet_gidx[num_triangles == 2]*2 + 1), dim=-1).view(-1)
-        ), dim=0)
-
-        uvs, uv_idx = self.map_uv(faces, face_gidx, num_tets*2)
-
-        return verts, faces, uvs, uv_idx
+        return verts, faces
 
 ###############################################################################
 # Regularizer
@@ -196,15 +155,11 @@ class DMTetGeometry(torch.nn.Module):
 
         # Run DM tet to get a base mesh
         v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
-        verts, faces, uvs, uv_idx = self.marching_tets(v_deformed, self.sdf, self.indices)
-        imesh = mesh.Mesh(verts, faces, v_tex=uvs, t_tex_idx=uv_idx)
+        verts, faces = self.marching_tets(v_deformed, self.sdf, self.indices)
 
-        # Run mesh operations to generate tangent space
-        imesh = mesh.auto_normals(imesh)
+        self.mesh_cache = mesh.Mesh(verts, faces)
 
-        self.mesh_cache = imesh
-
-        return imesh
+        return self.mesh_cache
 
     def forward(self, render_fn):
         m = self.getMesh()

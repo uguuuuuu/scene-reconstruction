@@ -6,7 +6,6 @@ import os
 import numpy as np
 import torch
 
-from . import obj
 from . import util
 
 ######################################################################################

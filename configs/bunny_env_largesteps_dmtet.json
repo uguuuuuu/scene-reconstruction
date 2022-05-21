@@ -2,7 +2,6 @@
     "name": "bunny_env_largesteps_dmtet",
     "scene": "data/scenes/bunny_env_largesteps/bunny_env_largesteps",
     "key": "Mesh[0]",
-    "n_sensors": 16,
     "batch_size": 2,
     "res": [320, 180],
     "spp_ref": 128,
