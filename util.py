@@ -154,7 +154,6 @@ def renderC_img(xml, integrator, sensor_ids = None, res = (256, 256), spp = 32, 
     if load_string == False: xml = xmlfile2str(xml)
     scene = Scene(xml)
     scene.set_opts(res, spp, sppe=0, sppse=0)
-    scene.prepare()
     imgs = scene.renderC(integrator, sensor_ids)
     assert(imgs is not None)
     return scene, imgs

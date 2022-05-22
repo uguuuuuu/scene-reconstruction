@@ -221,7 +221,7 @@
 <!-- Shapes -->
 
 	<shape type="obj" id="source">
-		<string name="filename" value="./data/meshes/sphere_2k.obj"/>
+		<string name="filename" value="./data/meshes/source.obj"/>
 		<ref id="white"/>
 	</shape>
 	<shape type="obj" id="target">

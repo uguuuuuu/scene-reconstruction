@@ -124,11 +124,11 @@ def average_edge_length(verts, faces):
 '''
 
 @torch.no_grad()
-def remesh(v: torch.Tensor, f: torch.Tensor):
+def remesh(v: torch.Tensor, f: torch.Tensor, n_itr=5):
     h = average_edge_length(v, f).cpu().numpy() / 2
     v_ = v.detach().cpu().numpy().astype(np.double)
     f_ = f.cpu().numpy().astype(np.int32)
-    v_, f_ = remesh_botsch(v_, f_, 5, h, True)
+    v_, f_ = remesh_botsch(v_, f_, n_itr, h, True)
     v_ = torch.from_numpy(v_).float().cuda().contiguous()
     f_ = torch.from_numpy(f_).cuda().contiguous()
     v_, f_, _ = remove_duplicates(v_, f_)

@@ -19,13 +19,26 @@ from torch.nn import functional
 import numpy as np
 import xml.etree.ElementTree as ET
 from GPUtil import showUtilization
+import igl
 
-integrator = psdr_cuda.DirectIntegrator(1, 1)
-res = (320, 180)
-scene_info = preprocess_scene('example.xml')
-scene = Scene(scene_info['tgt'])
-scene.set_opts(res, 128, sppe=0, sppse=0)
-scene.prepare()
-for _ in range(100):
-    img = integrator.renderC(scene._scene, 2)
-save_img(img, 'img.exr', res)
+def test_mem_capacity(res, spp):
+    integrator = psdr_cuda.DirectIntegrator(1, 1)
+    scene_info = preprocess_scene('example.xml')
+    scene = Scene(scene_info['tgt'])
+    scene.set_opts(res, spp, sppe=0, sppse=0)
+    scene.prepare()
+    for _ in range(100):
+        img = integrator.renderC(scene._scene, 2)
+    save_img(img, 'img.exr', res)
+
+def display_meshes(fnames):
+    ps.init()
+    for i, fname in enumerate(fnames):
+        v, f = pp3d.read_mesh(fname)
+        ps.register_surface_mesh(f'm{i}', v + np.array([5, 0, 0]) * i, f, False)
+    ps.show()
+
+display_meshes([
+    'data/meshes/bunny/bunny.obj',
+    *glob('output/bunny_env_largesteps_dmtet/optimized/optimized*.obj')
+])

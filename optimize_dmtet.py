@@ -69,7 +69,7 @@ trainset = DatasetMesh(sensor_ids, ref_imgs, ref_masks)
 opt = Adam(dmtet.parameters(), lr)
 
 scene = Scene(scene_info['sdf'])
-scene.set_opts(res, spp_opt) 
+scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt) 
 img_losses = []
 mask_losses = []
 reg_losses = []
@@ -83,7 +83,7 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
         img_loss = loss_fn(imgs[0], ref_imgs)
         mask_loss = functional.mse_loss(imgs[1], ref_masks)
         reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() \
-            * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000))
+            * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 5000))
         loss = img_loss + mask_loss + reg_loss
 
         opt.zero_grad()
@@ -128,7 +128,6 @@ del dmtet, trainset, opt, ref_imgs, ref_masks
 torch.cuda.empty_cache()
 
 scene.set_opts(res, 32, sppe=0, sppse=0)
-scene.prepare()
 opt_imgs = scene.renderC(integrator)
 opt_masks = scene.renderC(integrator_mask)
 for i, (img, mask) in enumerate(zip(opt_imgs, opt_masks)):
@@ -137,16 +136,18 @@ for i, (img, mask) in enumerate(zip(opt_imgs, opt_masks)):
 scene.dump(key, f'{outdir}/optimized/optimized_itr{it+1}_lr{lr}_weight{sdf_weight}.obj')
 
 for id in sensor_ids:
-    imgs2video(f"{outdir}/train/{id}/train.*.png", f"{outdir}/train/{id}.mp4", 10)
-    imgs2video(f"{outdir}/train/{id}/train_mask.*.exr", f"{outdir}/train/{id}_mask.mp4", 10)
+    imgs2video(f"{outdir}/train/{id}/train.*.png", f"{outdir}/train/{id}.mp4", 30)
+    imgs2video(f"{outdir}/train/{id}/train_mask.*.exr", f"{outdir}/train/{id}_mask.mp4", 30)
 
 '''
 Issues:
     - After the first 100 iterations, the surface does not change much
     during the following optimization (trapped in a local minimum)
         - Increase res of tet grid (too costly)
+            - Currently 64
         - Increase spp and res of reference images
             - Significantly improved the reconstructed geometry
+            - Highest possible is res (320, 180) and spp 128
         - Train for more iterations (nvdiffrec trains for 5,000 iterations)
     - The geomtry is entangled
         - Increase spp of differentiablly rendered images
@@ -156,7 +157,6 @@ Issues:
 
 '''
 TODO
-    - Optimize code to allow for higher image resolutions
-        - highest memory consumption: 4437
-            - when rendering reference images
+    - Experiment with different spp's of the differentiablly rendered images
+        - Limit is res (320, 180) spp 8
 '''

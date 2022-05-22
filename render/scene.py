@@ -24,18 +24,12 @@ class Scene:
             self._scene.opts.sppse = sppse
         self._configured = False
 
-    def prepare(self):
-        self._scene.configure()
-        self._configured = True
-
-    def prepared(self):
-        return self._configured
-
     def renderC(self, integrator, sensor_ids = None):
         if self._configured == False:
-            return None
-
+            self._scene.configure()
+            self._configured = True
         if sensor_ids is None: sensor_ids = range(self.num_sensors)
+
         imgs = []
         for id in sensor_ids:
             imgs.append(integrator.renderC(self._scene, id).numpy())
@@ -54,11 +48,11 @@ class Scene:
 
     def reload_mesh(self, key, v, f, uv = None, uv_idx = None):
         m = self._scene.param_map[key]
-        v = Vector3fD(v)
-        f = Vector3iD(f)
-        uv = Vector2fD() if uv is None else Vector2fD(uv)
-        uv_idx = Vector3iD() if uv_idx is None else Vector3iD(uv_idx)
-        self._scene.reload_mesh_mem(m, v, f, uv, uv_idx)
+        v_ = Vector3fD(v)
+        f_ = Vector3iD(f)
+        uv_ = Vector2fD() if uv is None else Vector2fD(uv)
+        uv_idx_ = Vector3iD() if uv_idx is None else Vector3iD(uv_idx)
+        self._scene.reload_mesh_mem(m, v_, f_, uv_, uv_idx_)
         self._configured = False
 
     def get_mesh(self, key, to_world=False):
@@ -67,6 +61,11 @@ class Scene:
         v = transform(v, m.to_world).numpy() if to_world else v.numpy()
         f = m.face_indices.numpy()
         return v, f
+
+    def update_vertex_positions(self, key, v):
+        m = self._scene.param_map[key]
+        m.vertex_positions = Vector3fD(v)
+        self._configured = False
 
     def dump(self, key, fname):
         m = self._scene.param_map[key]
