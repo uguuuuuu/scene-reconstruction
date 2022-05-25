@@ -5,14 +5,14 @@
     "batch_size": 2,
     "res": [320, 180],
     "spp_ref": 128,
-    "spp_opt": 8,
+    "spp_opt": 4,
     "loss_fn": "l1",
     "tonemap": false,
     "learning_rate": 0.05,
     "lambda": 99,
     "alpha": 0,
-    "start_itr": -1,
     "n_itr": 500,
+    "start_itr": -1,
     "save_interval": 250,
     "remesh_itr": -1
 }

@@ -104,3 +104,44 @@ class RenderD_Mat(torch.autograd.Function):
         # ek.cuda_malloc_trim()
         return grad
 renderDM = RenderD_Mat.apply
+
+class RenderD_Vertex_Alpha_Mat(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, v, mat):
+        assert(v.requires_grad and mat.requires_grad)
+        scene = config.scene
+        integrator, integrator_mask =  config.integrator, config.integrator_mask
+        key, sensor_ids = config.key, config.sensor_ids
+
+        ctx.v = Vector3fD(v)
+        ctx.mat = Vector3fD(mat)
+        ek.set_requires_gradient(ctx.v)
+        ek.set_requires_gradient(ctx.mat)
+        scene.param_map[key].vertex_positions = ctx.v
+        scene.param_map[key].bsdf.reflectance.data = ctx.mat
+        scene.configure()
+        ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
+        ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
+
+        imgs = torch.stack([img.torch() for img in ctx.imgs])
+        masks = torch.stack([mask.torch() for mask in ctx.masks])
+        # ek.cuda_malloc_trim()
+        return torch.stack([imgs, masks])
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        for i in range(len(ctx.imgs)):
+            ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[0][i]))
+            ek.set_gradient(ctx.masks[i], Vector3fC(grad_out[1][i]))
+        FloatD.backward()
+
+        grad_v = ek.gradient(ctx.v)
+        nan_mask = ek.isnan(grad_v)
+        grad_v = ek.select(nan_mask, 0, grad_v).torch()
+        grad_mat = ek.gradient(ctx.mat)
+        nan_mask = ek.isnan(grad_mat)
+        grad_mat = ek.select(nan_mask, 0, grad_mat).torch()
+
+        del ctx.v, ctx.imgs, ctx.masks
+        # ek.cuda_malloc_trim()
+        return grad_v, grad_mat

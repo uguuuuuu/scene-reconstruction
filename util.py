@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import cv2
 import imageio.v2 as iio
 import torch
+from torch.nn import functional
 import numpy as np
 import enoki as ek
 from enoki.cuda_autodiff import Vector3f as Vector3fD
@@ -157,6 +158,14 @@ def renderC_img(xml, integrator, sensor_ids = None, res = (256, 256), spp = 32, 
     imgs = scene.renderC(integrator, sensor_ids)
     assert(imgs is not None)
     return scene, imgs
+
+'''
+Adapted from https://github.com/NVlabs/nvdiffrec
+'''
+def lr_schedule(iter, warmup_iter):
+        if iter < warmup_iter:
+            return iter / warmup_iter 
+        return max(0.0, 10**(-(iter - warmup_iter)*0.0002)) # Exponential falloff from [1.0, 0.1] over 5k epochs.
 
 class TimerError(Exception):
     def __init__(self, *args: object) -> None:

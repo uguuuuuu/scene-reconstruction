@@ -90,6 +90,7 @@ with torch.no_grad():
     L = laplacian_uniform(v.shape[0], f)
     assert(L.requires_grad == False)
 u.requires_grad_()
+opt = AdamUniform([u], lr)
 
 img_losses = []
 reg_losses = []
@@ -194,6 +195,8 @@ Issues:
         - Increase spp
     - Remeshing loses UVs (causing problems when jointly optimizing geometry and materials)
         - Look up instant meshes
+    - Training images too noisy
+        - Increase spp and res
 '''
 
 '''

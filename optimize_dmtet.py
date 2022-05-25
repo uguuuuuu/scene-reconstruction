@@ -19,13 +19,12 @@ from render.loss import get_loss_fn
 from render.scene import Scene
 
 FLAGS = json.load(open('configs/bunny_env_largesteps_dmtet.json', 'r'))
+sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 batch_size = FLAGS['batch_size']
 key = FLAGS['key']
 res = FLAGS['res']
 spp_ref, spp_opt = FLAGS['spp_ref'], FLAGS['spp_opt']
 loss_fn = get_loss_fn(FLAGS['loss_fn'], FLAGS['tonemap'])
-sdf_weight = FLAGS['sdf_weight']
-lr = FLAGS['learning_rate']
 start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
 outdir = f"output/{FLAGS['name']}"
 SDF_PATH = f'{outdir}/optimized/sdf.obj'
@@ -60,9 +59,8 @@ scene, init_masks = renderC_img(scene_info['sdf'], integrator_mask, sensor_ids, 
 for i, (img, mask) in enumerate(zip(init_imgs, init_masks)):
     save_img(img, f'{outdir}/ref/init_{sensor_ids[i]}.png', res)
     save_img(mask, f'{outdir}/ref/initmask_{sensor_ids[i]}.exr', res)
-del init_imgs, init_masks
+del init_imgs, init_masks, scene
 
-# ek.cuda_malloc_trim()
 ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
 ref_masks = torch.stack([torch.from_numpy(mask).cuda() for mask in ref_masks])
 trainset = DatasetMesh(sensor_ids, ref_imgs, ref_masks)
@@ -82,9 +80,10 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
 
         img_loss = loss_fn(imgs[0], ref_imgs)
         mask_loss = functional.mse_loss(imgs[1], ref_masks)
-        reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean() \
-            * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 5000))
-        loss = img_loss + mask_loss + reg_loss
+        reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
+        loss = img_loss + \
+            mask_loss + \
+            reg_loss * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 5000))
 
         opt.zero_grad()
         loss.backward()
@@ -149,8 +148,8 @@ Issues:
             - Significantly improved the reconstructed geometry
             - Highest possible is res (320, 180) and spp 128
         - Train for more iterations (nvdiffrec trains for 5,000 iterations)
-    - The geomtry is entangled
-        - Increase spp of differentiablly rendered images
+    - Internal geometry
+        - Set the learning rate to be high at the beginning and then fall off exponentially 
     - Too many texture coordinates (exceeding the capacity of int to index)
         - modify the uv mapping algorithm
 '''
@@ -158,5 +157,5 @@ Issues:
 '''
 TODO
     - Experiment with different spp's of the differentiablly rendered images
-        - Limit is res (320, 180) spp 8
+        - Limit is res (320, 180) spp = sppe = sppse = 4
 '''
