@@ -24,5 +24,7 @@ elif [ "$ZSH_VERSION" ]; then
 fi
 
 export PYTHONPATH="$RECON_DIR/ext/large-steps-pytorch/ext/botsch-kobbelt-remesher-libigl/build:$PYTHONPATH"
-export PYTHONPATH="$RECON_DIR/ext/enoki/build:$RECON_DIR/ext/psdr-cuda/build/lib:$PYTHONPATH"
+export PYTHONPATH="$RECON_DIR/ext/enoki/build:$PYTHONPATH"
+export PYTHONPATH="$RECON_DIR/ext/psdr-cuda/build/lib:$PYTHONPATH"
+# export PYTHONPATH="$HOME/psdr-cuda/build/lib:$PYTHONPATH"
 export LD_LIBRARY_PATH="$RECON_DIR/ext/enoki/build:$LD_LIBRARY_PATH"

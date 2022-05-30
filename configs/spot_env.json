@@ -1,15 +1,17 @@
 {
     "name": "spot_env",
-    "scene": "data/scenes/spot_env.xml",
-    "n_sensors": 6,
-    "sensor_ids": [0, 2, 7, 9, 12, 14],
+    "scene": "data/scenes/spot_env/spot_env",
     "key": "Mesh[0]",
-    "mat_key": "BSDF[id=red]",
-    "res": [284, 216],
-    "optimizer": "adam",
+    "batch_size": 2,
+    "res": [320, 180],
+    "spp_ref": 128,
+    "spp_opt": 4,
     "loss_fn": "l1",
+    "tonemap": false,
+    "learning_rate": 0.01,
+    "lambda": 19,
+    "alpha":0,
+    "n_itr": 500,
     "start_itr": -1,
-    "n_itr": 1000,
-    "save_interval": 500,
-    "learning_rate": 0.05
+    "save_interval": 250
 }

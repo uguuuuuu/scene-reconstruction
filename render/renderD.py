@@ -142,6 +142,7 @@ class RenderD_Vertex_Alpha_Mat(torch.autograd.Function):
         nan_mask = ek.isnan(grad_mat)
         grad_mat = ek.select(nan_mask, 0, grad_mat).torch()
 
-        del ctx.v, ctx.imgs, ctx.masks
+        del ctx.v, ctx.mat, ctx.imgs, ctx.masks
         # ek.cuda_malloc_trim()
         return grad_v, grad_mat
+renderDVAM = RenderD_Vertex_Alpha_Mat.apply

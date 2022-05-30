@@ -207,6 +207,12 @@
 	<bsdf type="diffuse" id="white">
 		<rgb name="reflectance" value="0.95, 0.95, 0.95"/>
 	</bsdf>
+	<bsdf type="diffuse" id="blue">
+		<rgb name="reflectance" value="0, 0, 1"/>
+	</bsdf>
+	<bsdf type="diffuse" id="kd">
+		<rgb name="reflectance" value="1.0, 0.0, 0.0"/>
+	</bsdf>
 
 <!-- Emitters -->
 
@@ -222,13 +228,13 @@
 
 	<shape type="obj" id="source">
 		<string name="filename" value="./data/meshes/source.obj"/>
-		<ref id="white"/>
+		<ref id="kd"/>
 	</shape>
 	<shape type="obj" id="target">
 		<string name="filename" value="./data/meshes/bunny/bunny.obj"/>
 		<transform name="to_world">
 			<translate x="0.571032" y="-1.05297" z="0.24338"/>
 		</transform>
-		<ref id="white"/>
+		<ref id="blue"/>
 	</shape>
 </scene>

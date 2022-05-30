@@ -28,7 +28,7 @@ else:
 for i in range(n_sensors):
     os.makedirs(f'{outdir}/{sensor_ids[i]}', exist_ok=True)
 if start_itr != 0:
-    mat, start_itr = load_tensor(f'{outdir}/mat.*.pt', start_itr)
+    mat, start_itr = load_ckp(f'{outdir}/mat.*.pt', start_itr)
     if mat is not None:
         assert(str(mat.device) == 'cuda:0')
         assert(mat.requires_grad == False)

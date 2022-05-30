@@ -127,17 +127,7 @@ class DMTet:
             torch.gather(input=idx_map[num_triangles == 2], dim=1, index=self.triangle_table[tetindex[num_triangles == 2]][:, :6]).reshape(-1,3),
         ), dim=0)
 
-        # Get global face index (static, does not depend on topology)
-        num_tets = tet_fx4.shape[0]
-        tet_gidx = torch.arange(num_tets, dtype=torch.long, device="cuda")[valid_tets]
-        face_gidx = torch.cat((
-            tet_gidx[num_triangles == 1]*2,
-            torch.stack((tet_gidx[num_triangles == 2]*2, tet_gidx[num_triangles == 2]*2 + 1), dim=-1).view(-1)
-        ), dim=0)
-
-        uvs, uv_idx = self.map_uv(faces, face_gidx, num_tets*2)
-
-        return verts, faces, uvs, uv_idx
+        return verts, faces
 
 ###############################################################################
 # Regularizer
@@ -178,7 +168,7 @@ class DMTetGeometry(torch.nn.Module):
         assert(self.deform.shape == self.verts.shape)
         self.register_parameter('deform', self.deform)
 
-        self.mesh_cache = None
+        self._mesh_cache = None
 
     def generate_edges(self):
         with torch.no_grad():
@@ -192,18 +182,21 @@ class DMTetGeometry(torch.nn.Module):
         return torch.min(self.verts, dim=0).values, torch.max(self.verts, dim=0).values
 
     def getMesh(self):
-        if self.mesh_cache is not None: return self.mesh_cache
+        if self._mesh_cache is not None:
+            return self._mesh_cache
 
         # Run DM tet to get a base mesh
         v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
-        verts, faces, uvs, uv_idx = self.marching_tets(v_deformed, self.sdf, self.indices)
+        verts, faces = self.marching_tets(v_deformed, self.sdf, self.indices)
 
-        self.mesh_cache = mesh.Mesh(verts, faces, v_tex=uvs, t_tex_idx=uv_idx)
+        self._mesh_cache = mesh.Mesh(verts, faces)
 
-        return self.mesh_cache
+        return self._mesh_cache
 
     def forward(self, render_fn):
         m = self.getMesh()
-        imgs = render_fn(m.v_pos)
-        self.mesh_cache = None
+
+        imgs = render_fn(m.v_pos, m.material)
+
+        self._mesh_cache = None
         return imgs
