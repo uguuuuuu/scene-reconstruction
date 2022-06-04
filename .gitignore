@@ -8,3 +8,6 @@ __pycache__
 
 **/output
 **/cvt
+
+data/nerf_synthetic/
+data/nerd/

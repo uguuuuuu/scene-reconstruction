@@ -1,5 +1,6 @@
+from re import I
 import enoki as ek
-from enoki.cuda_autodiff import Float32 as FloatD, Vector3f as Vector3fD, Vector3i as Vector3iD
+from enoki.cuda_autodiff import Float32 as FloatD, Vector2f as Vector2fD, Vector3f as Vector3fD, Vector3i as Vector3iD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC
 import torch
 
@@ -121,18 +122,20 @@ class RenderD_Vertex_Alpha_Mat(torch.autograd.Function):
         scene.param_map[key].bsdf.reflectance.data = ctx.mat
         scene.configure()
         ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
-        ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
+        ctx.masks = [ek.hmean(integrator_mask.renderD(scene, id)) for id in sensor_ids]
 
         imgs = torch.stack([img.torch() for img in ctx.imgs])
         masks = torch.stack([mask.torch() for mask in ctx.masks])
+        masks = masks[...,None]
+
         # ek.cuda_malloc_trim()
-        return torch.stack([imgs, masks])
+        return torch.cat([imgs, masks], dim=-1)
 
     @staticmethod
     def backward(ctx, grad_out):
         for i in range(len(ctx.imgs)):
-            ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[0][i]))
-            ek.set_gradient(ctx.masks[i], Vector3fC(grad_out[1][i]))
+            ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[i,:,0:3]))
+            ek.set_gradient(ctx.masks[i], FloatC(grad_out[i,:,3]))
         FloatD.backward()
 
         grad_v = ek.gradient(ctx.v)
@@ -146,3 +149,55 @@ class RenderD_Vertex_Alpha_Mat(torch.autograd.Function):
         # ek.cuda_malloc_trim()
         return grad_v, grad_mat
 renderDVAM = RenderD_Vertex_Alpha_Mat.apply
+
+class RenderD_Vertex_Alpha_Mat_Env(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, v, mat, env):
+        assert(v.requires_grad and mat.requires_grad and env.requires_grad)
+        scene = config.scene
+        integrator, integrator_mask =  config.integrator, config.integrator_mask
+        key, sensor_ids = config.key, config.sensor_ids
+
+        ctx.v = Vector3fD(v)
+        ctx.mat = Vector3fD(mat)
+        ctx.env = Vector3fD(env)
+        ek.set_requires_gradient(ctx.v)
+        ek.set_requires_gradient(ctx.mat)
+        ek.set_requires_gradient(ctx.env)
+        scene.param_map[key].vertex_positions = ctx.v
+        scene.param_map[key].bsdf.reflectance.data = ctx.mat
+        scene.param_map['Emitter[0]'].radiance.data = ctx.env
+        scene.configure()
+        ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
+        ctx.masks = [ek.hmean(integrator_mask.renderD(scene, id)) for id in sensor_ids]
+
+        imgs = torch.stack([img.torch() for img in ctx.imgs])
+        masks = torch.stack([mask.torch() for mask in ctx.masks])
+        masks = masks[...,None]
+        
+        # ek.cuda_malloc_trim()
+        return torch.cat([imgs, masks], dim=-1)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        for i in range(len(ctx.imgs)):
+            ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[i,:,0:3]))
+            ek.set_gradient(ctx.masks[i], FloatC(grad_out[i,:,3]))
+        FloatD.backward()
+
+        grad_v = ek.gradient(ctx.v)
+        nan_mask = ek.isnan(grad_v)
+        grad_v = ek.select(nan_mask, 0, grad_v).torch()
+
+        grad_mat = ek.gradient(ctx.mat)
+        nan_mask = ek.isnan(grad_mat)
+        grad_mat = ek.select(nan_mask, 0, grad_mat).torch()
+
+        grad_env = ek.gradient(ctx.env)
+        nan_mask = ek.isnan(grad_env)
+        grad_env = ek.select(nan_mask, 0, grad_env).torch()
+
+        del ctx.v, ctx.mat, ctx.env, ctx.imgs, ctx.masks
+        # ek.cuda_malloc_trim()
+        return grad_v, grad_mat, grad_env
+renderDVAME = RenderD_Vertex_Alpha_Mat_Env.apply

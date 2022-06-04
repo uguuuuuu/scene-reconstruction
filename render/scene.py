@@ -3,7 +3,7 @@ import enoki as ek
 from enoki.cuda_autodiff import Float32 as FloatD, Vector2f as Vector2fD, Vector3f as Vector3fD, Vector3i as Vector3iD
 from .util import transform, flip_y, flip_y_np, wrap_np
 from . import config
-from .renderD import renderDVA, renderDVAM
+from .renderD import renderDVA, renderDVAM, renderDVAME
 
 class Scene:
     def __init__(self, xml):
@@ -55,6 +55,12 @@ class Scene:
         self._configured = True
         return imgs
 
+    def renderDVAME(self, v, mat, env, key, integrator, integrator_mask, sensor_ids):
+        self._set_config(key, integrator, integrator_mask, sensor_ids)
+        imgs = renderDVAME(v, mat, env)
+        self._configured = True
+        return imgs
+
     def reload_mesh(self, key, v, f, uv = None, uv_idx = None):
         m = self._scene.param_map[key]
         v_ = Vector3fD(v)
@@ -80,6 +86,17 @@ class Scene:
         m.bsdf.reflectance.resolution = res
         if not res_only:
             m.bsdf.reflectance.data = Vector3fD(mat.reshape(-1,3))
+    
+    def reload_envmap(self, data):
+        res = data.shape[:2]
+        res = (res[1], res[0])
+        assert(res[0] == 2*res[1])
+
+        envmap = self._scene.param_map['Emitter[0]']
+        envmap.radiance.resolution = res
+        envmap.radiance.data = Vector3fD(data.reshape(-1,3))
+
+        self._configured = False
 
     def get_mesh(self, key, to_world=False, return_uv=False):
         m = self._scene.param_map[key]

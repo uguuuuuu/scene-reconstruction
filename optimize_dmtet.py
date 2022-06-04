@@ -1,4 +1,5 @@
 import os
+import random
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 import json
@@ -18,20 +19,47 @@ from dataset import DatasetMesh
 from render.loss import get_loss_fn
 from render.scene import Scene
 from render.mlptexture import MLPTexture3D
+from render.util import scale_img
+from xml_util import keep_sensors, preprocess_scene
 
-FLAGS = json.load(open('configs/spot_env_dmtet.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
+tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
 key = FLAGS['key']
-res = FLAGS['res']
-spp_ref, spp_opt = FLAGS['spp_ref'], FLAGS['spp_opt']
+res, env_res = FLAGS['res'], FLAGS['env_res']
+spp_ref, spp_opt = FLAGS.get('spp_ref'), FLAGS['spp_opt']
 loss_fn = get_loss_fn(FLAGS['loss_fn'], FLAGS['tonemap'])
 start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
+ref_dir = FLAGS.get('ref_dir')
 outdir = f"output/{FLAGS['name']}"
 SDF_PATH = f'{outdir}/optimized/sdf.obj'
-scene_info = preprocess_scene(f"{FLAGS['scene']}.xml")
-n_sensors = scene_info['n_sensors']
-sensor_ids = range(n_sensors)
+scene_info = preprocess_scene(f"{FLAGS['scene_file']}")
+
+if start_itr != 0:
+    print('Loading checkpoint...')
+    ckp, start_itr = load_ckp(f'{outdir}/optimized/ckp.*.tar', start_itr)
+    if ckp is not None:
+        sensor_ids = ckp['sensor_ids']
+        n_sensors = len(sensor_ids)
+        scene_info['src'] = keep_sensors(scene_info['src'], sensor_ids)
+        print(f'Loaded checkpoint of epoch {start_itr}')
+    print('Finished')
+else:
+    ckp = None
+if ckp is None:
+    ckp = {}
+
+if len(ckp.keys()) == 0:
+    if FLAGS.get('n_sensors') is None:
+        n_sensors = scene_info['n_sensors']
+        sensor_ids = range(n_sensors)
+    else:
+        sensor_ids = [0]
+        sensor_ids.extend(random.sample(range(1, scene_info['n_sensors']), FLAGS['n_sensors']-1))
+        sensor_ids.sort()
+        scene_info['src'] = keep_sensors(scene_info['src'], sensor_ids)
+        n_sensors = len(sensor_ids)
 
 for i in range(n_sensors):
     os.makedirs(f'{outdir}/train/{sensor_ids[i]}', exist_ok=True)
@@ -39,29 +67,49 @@ os.makedirs(f'{outdir}/stats', exist_ok=True)
 os.makedirs(f'{outdir}/ref', exist_ok=True)
 os.makedirs(f'{outdir}/optimized', exist_ok=True)
 
-print('Rendering reference images...')
 integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
+integrator.hide_emitters = True
 integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
-scene, ref_imgs = renderC_img(scene_info['tgt'], integrator, res=res, spp=spp_ref)
-scene, ref_masks = renderC_img(scene_info['tgt'], integrator_mask, res=res, spp=spp_ref)
-for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
-    save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
-    save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
-ref_v, ref_f = scene.get_mesh(key, True)
+ref_v = ref_f = None
+print('Writing reference images...')
+if ref_dir is None:
+    scene, ref_imgs = renderC_img(scene_info['tgt'], integrator, res=res, spp=spp_ref)
+    scene, ref_masks = renderC_img(scene_info['tgt'], integrator_mask, res=res, spp=spp_ref)
+    for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
+        save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
+        save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
+    ref_masks = np.mean(ref_masks, axis=-1, keepdims=True)
+    ref_imgs = np.concatenate([ref_imgs, ref_masks], axis=-1)
+    del ref_masks
+    ref_v, ref_f = scene.get_mesh(key, True)
+else:
+    filenames = next(os.walk(ref_dir), (None, None, []))[2]
+    if len(filenames) == 0:
+        raise FileNotFoundError('Nothing in the directory containing reference images!')
+    def extract_number(key: str):
+        number = ''
+        for c in key:
+            if c.isdigit():
+                number += c
+        return int(number)
+    filenames.sort(key=extract_number)
+
+    ref_imgs = []
+    for id in sensor_ids:
+        filename = filenames[id]
+        filename = os.path.join(ref_dir, filename)
+        img = load_img(filename)
+        if tuple(img.shape[:-1]) != (res[1], res[0]):
+            img = scale_img(img, (res[1], res[0])).numpy()
+        ref_imgs.append(img.reshape(-1,img.shape[-1]))
+
+    for i, img in enumerate(ref_imgs):
+        save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.exr', res)
+    ref_imgs = np.array(ref_imgs)
 print('Finished')
 
-if start_itr != 0:
-    print('Loading checkpoint...')
-    ckp, start_itr = load_ckp(f'{outdir}/optimized/ckp.*.tar', start_itr)
-    if ckp is not None:
-        print(f'Loaded checkpoint of epoch {start_itr}')
-    print('Finished')
-else:
-    ckp = None
-if ckp is None:
-    ckp = {}
 print('Initializing parameters...')
-dmtet = DMTetGeometry(64, 4, ckp.get('sdf'), ckp.get('deform'))
+dmtet = DMTetGeometry(tet_res, tet_scale, ckp.get('sdf'), ckp.get('deform'))
 kd_min, kd_max = torch.tensor([0., 0., 0.], device='cuda'), torch.tensor([1., 1., 1.], device='cuda')
 material = MLPTexture3D(dmtet.getAABB(), min_max=torch.stack([kd_min, kd_max]))
 if ckp.get('mat') is not None:
@@ -69,25 +117,32 @@ if ckp.get('mat') is not None:
     material.train()
 dmtet.getMesh().material = material.sample(dmtet.getMesh().v_pos)
 obj.write_obj(SDF_PATH, mesh.auto_normals(dmtet.getMesh()))
+if ckp.get('envmap') is not None:
+    envmap = ckp['envmap']
+    envmap.requires_grad_()
+else:
+    envmap = torch.rand([env_res[1]*env_res[0], 3], dtype=torch.float32, device='cuda', requires_grad=True)
 print(f'{dmtet.getMesh().v_pos.shape[0]} vertices')
 print('Finished')
+
 print('Rendering initial images...')
 scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.int())
 scene.reload_mat(key, dmtet.getMesh().material)
+scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
 scene.set_opts(res, 32, sppe=0, sppse=0)
-init_imgs = scene.renderC(integrator, sensor_ids)
-init_masks = scene.renderC(integrator_mask, sensor_ids)
+init_imgs = scene.renderC(integrator)
+init_masks = scene.renderC(integrator_mask)
 for i, (img, mask) in enumerate(zip(init_imgs, init_masks)):
     save_img(img, f'{outdir}/ref/init_{sensor_ids[i]}.png', res)
     save_img(mask, f'{outdir}/ref/initmask_{sensor_ids[i]}.exr', res)
+save_img(envmap, f'{outdir}/ref/initenv.exr', env_res)
 del init_imgs, init_masks, scene
 print('Finished')
 
 ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
-ref_masks = torch.stack([torch.from_numpy(mask).cuda() for mask in ref_masks])
-trainset = DatasetMesh(sensor_ids, ref_imgs, ref_masks)
-opt = Adam(list(dmtet.parameters())+list(material.parameters()), lr)
+trainset = DatasetMesh(range(n_sensors), ref_imgs)
+opt = Adam(list(dmtet.parameters())+list(material.parameters())+[envmap], lr)
 if ckp.get('optimizer') is not None:
     opt.load_state_dict(ckp['optimizer'])
 # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda itr: lr_schedule(itr, 0))
@@ -97,6 +152,7 @@ if ckp.get('optimizer') is not None:
 scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.to(torch.int32))
 scene.reload_mat(key, dmtet.getMesh().material)
+scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
 scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt) 
 img_losses = []
 mask_losses = []
@@ -104,16 +160,19 @@ reg_losses = []
 distances = []
 for it in tqdm(range(start_itr, start_itr + n_itr)):
     img_loss_ = mask_loss_ = reg_loss_ = 0.
-    for ids, ref_imgs, ref_masks in DataLoader(trainset, batch_size, True):
+    for ids, ref_imgs in DataLoader(trainset, batch_size, True):
 
-        imgs = dmtet(lambda v, mat: scene.renderDVAM(v, mat, key, integrator, integrator_mask, ids))
+        imgs = dmtet(lambda v, mat: scene.renderDVAME(v, mat, envmap, key, integrator, integrator_mask, ids))
 
-        img_loss = loss_fn(imgs[0], ref_imgs)
-        mask_loss = functional.mse_loss(imgs[1], ref_masks)
+        img_loss = loss_fn(imgs[...,:3], ref_imgs[...,:3])
+        mask_loss = functional.mse_loss(imgs[...,3], ref_imgs[...,3])
         reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
+        white = envmap.mean(dim=-1, keepdim=True)
+        reg_loss_lgt = functional.l1_loss(envmap, white.expand(-1,3))
         loss = img_loss + \
             mask_loss + \
-            reg_loss * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000))
+            reg_loss * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000)) + \
+            reg_loss_lgt
 
         opt.zero_grad()
         loss.backward()
@@ -124,6 +183,7 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
         f = m.t_pos_idx
         m.material = material.sample(v)
         with torch.no_grad():
+            envmap.clamp_min_(0.)
             scene.reload_mesh(key, v, f.to(torch.int32))
             scene.reload_mat(key, m.material, res_only=True)
             img_loss_ += img_loss
@@ -131,36 +191,41 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             reg_loss_ += reg_loss
             if it % 2 == 0:
                 for i, id in enumerate(ids):
-                    save_img(imgs[0][i], f'{outdir}/train/{id}/train.{it+1:04}.png', res)
-                    save_img(imgs[1][i], f'{outdir}/train/{id}/train_mask.{it+1:04}.exr', res)
+                    save_img(imgs[i,:,:3], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.exr', res)
+                    save_img(imgs[i,:,3:], f'{outdir}/train/{sensor_ids[id]}/train_mask.{it+1:04}.exr', res)
     # scheduler.step()
     with torch.no_grad():
         if (it+1)%save_interval == 0:
             torch.save({
                 'sdf': dmtet.sdf.detach(),
                 'deform': dmtet.deform.detach(),
-                'mat': material.state_dict(),                
+                'mat': material.state_dict(), 
+                'envmap': envmap.detach(),
+                'env_res': env_res,               
                 'optimizer': opt.state_dict(),
+                'sensor_ids': sensor_ids,
                 # 'scheduler': scheduler.state_dict()
             }, f'{outdir}/optimized/ckp.{it+1}.tar')
         img_losses.append(img_loss_.cpu().numpy())
         mask_losses.append(mask_loss_.cpu().numpy())
         reg_losses.append(reg_loss_.cpu().numpy())
-        v, f = scene.get_mesh(key, True)
-        distances.append(hausdorff(v, f, ref_v, ref_f))
+        if ref_v is not None and ref_f is not None:
+            v, f = scene.get_mesh(key, True)
+            distances.append(hausdorff(v, f, ref_v, ref_f))
 
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.int())
 dmtet.getMesh().material = material.sample(dmtet.getMesh().v_pos)
 scene.reload_mat(key, dmtet.getMesh().material)
+scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
 scene.set_opts(res, 32, sppe=0, sppse=0)
 opt_imgs = scene.renderC(integrator)
 opt_masks = scene.renderC(integrator_mask)
 for i, (img, mask) in enumerate(zip(opt_imgs, opt_masks)):
-    save_img(img, f'{outdir}/optimized/itr{it+1}_{i}.png', res)
-    save_img(mask, f'{outdir}/optimized/itr{it+1}_{i}_mask.exr', res)
+    save_img(img, f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}.png', res)
+    save_img(mask, f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}_mask.exr', res)
 
 material.cleanup()
-del dmtet, material, opt, trainset, ref_imgs, ref_masks, scene
+del dmtet, material, opt, trainset, ref_imgs, scene
 torch.cuda.empty_cache()
 ek.cuda_malloc_trim()
 
@@ -171,31 +236,15 @@ plt.yscale('log')
 plt.legend()
 plt.savefig(f'{outdir}/stats/losses_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
 plt.close()
-plt.plot(distances)
-plt.ylabel("Hausdorff Distance")
-plt.savefig(f'{outdir}/stats/distances_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
+if len(distances) != 0:
+    plt.plot(distances)
+    plt.ylabel("Hausdorff Distance")
+    plt.savefig(f'{outdir}/stats/distances_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
 
 for id in sensor_ids:
-    imgs2video(f"{outdir}/train/{id}/train.*.png", f"{outdir}/train/{id}.mp4", 30)
+    imgs2video(f"{outdir}/train/{id}/train.*.exr", f"{outdir}/train/{id}.mp4", 30)
     imgs2video(f"{outdir}/train/{id}/train_mask.*.exr", f"{outdir}/train/{id}_mask.mp4", 30)
 
-
-ckp, _ = load_ckp(f'{outdir}/optimized/ckp.*.tar')
-dmtet = DMTetGeometry(64, 4, ckp['sdf'], ckp['deform'])
-kd_min, kd_max = [0., 0., 0.], [1., 1., 1.]
-material = MLPTexture3D(dmtet.getAABB(),
-            min_max=torch.stack([torch.tensor(kd_min, device='cuda'), torch.tensor(kd_max, device='cuda')]))
-print('Loading material')
-material.load_state_dict(ckp['mat'])
-material.eval()
-print('Loaded')
-
-print('Extracting texture')
-m = extract_texture(dmtet.getMesh(), material)
-print('Finished')
-print('Writing mesh')
-obj.write_obj(f'{outdir}/optimized/optimized.obj', auto_normals(m), True)
-print('Finished')
 
 '''
 Issues:
@@ -217,4 +266,6 @@ TODO
         - Limit is res (320, 180) spp = sppe = sppse = 4
     - Experiment with different coordinate networks for materials
     - Experiment with different shading models
+    - Experiment with different datasets
+    - Validate after training
 '''

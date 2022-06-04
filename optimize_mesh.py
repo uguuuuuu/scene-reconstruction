@@ -17,23 +17,32 @@ from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Mat
 import psdr_cuda
 from util import *
 from render.loss import get_loss_fn
+from render.util import scale_img
+from xml_util import keep_sensors, preprocess_scene
 from dataset import DatasetMesh
 from geometry.util import laplacian_uniform, regularization_loss, remesh
 
-FLAGS = json.load(open('configs/spot_env.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/chair.json', 'r'))
 batch_size = FLAGS['batch_size']
 start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
 key = FLAGS['key']
 res = FLAGS['res']
-spp_ref, spp_opt = FLAGS['spp_ref'], FLAGS['spp_opt']
+spp_ref, spp_opt = FLAGS.get('spp_ref'), FLAGS['spp_opt']
 loss_fn = get_loss_fn(FLAGS['loss_fn'], FLAGS['tonemap'])
 lambda_, alpha = FLAGS['lambda'], FLAGS['alpha']
 if alpha == 0.: alpha = None
 lr = FLAGS['learning_rate']
+ref_dir = FLAGS.get('ref_dir')
 outdir = f"output/{FLAGS['name']}"
-scene_info = preprocess_scene(f"{FLAGS['scene']}.xml")
-n_sensors = scene_info['n_sensors']
-sensor_ids = range(n_sensors)
+scene_info = preprocess_scene(f"{FLAGS['scene_file']}")
+
+try:
+    sensor_ids = np.load('data/sensor_ids.npy')
+    n_sensors = len(sensor_ids)
+    scene_info['src'] = keep_sensors(scene_info['src'], sensor_ids)
+except FileNotFoundError:
+    n_sensors = scene_info['n_sensors']
+    sensor_ids = range(n_sensors)
 
 for i in range(n_sensors):
     os.makedirs(f'{outdir}/train/{sensor_ids[i]}', exist_ok=True)
@@ -41,20 +50,52 @@ os.makedirs(f'{outdir}/stats', exist_ok=True)
 os.makedirs(f'{outdir}/ref', exist_ok=True)
 os.makedirs(f'{outdir}/optimized', exist_ok=True)
 
-print('Rendering reference images...')
 integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
+integrator.hide_emitters = True
 integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
-scene, ref_imgs = renderC_img(scene_info['tgt'], integrator, res=res, spp=spp_ref)
-scene, ref_masks = renderC_img(scene_info['tgt'], integrator_mask, res=res, spp=spp_ref)
-for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
-    save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
-    save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
-ref_v, ref_f = scene.get_mesh(key, True)
+ref_v = ref_f = None
+print('Writing reference images...')
+if ref_dir is None:
+    # Rendering training images
+    scene, ref_imgs = renderC_img(scene_info['tgt'], integrator, res=res, spp=spp_ref)
+    scene, ref_masks = renderC_img(scene_info['tgt'], integrator_mask, res=res, spp=spp_ref)
+    for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
+        save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
+        save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
+    ref_masks = np.mean(ref_masks, axis=-1, keepdims=True)
+    ref_imgs = np.concatenate([ref_imgs, ref_masks], axis=-1)
+    ref_v, ref_f = scene.get_mesh(key, True)
+else:
+    # Read existing training images
+    filenames = next(os.walk(ref_dir), (None, None, []))[2]
+    if len(filenames) == 0:
+        raise FileNotFoundError('Nothing in the directory containing reference images!')
+    def extract_number(key: str):
+        number = ''
+        for c in key:
+            if c.isdigit():
+                number += c
+        return int(number)
+    filenames.sort(key=extract_number)
+
+    ref_imgs = []
+    for id in sensor_ids:
+        filename = filenames[id]
+        filename = os.path.join(ref_dir, filename)
+        img = load_img(filename)
+        if tuple(img.shape[:-1]) != (res[1], res[0]):
+            img = scale_img(img, (res[1], res[0])).numpy()
+        ref_imgs.append(img.reshape(-1,img.shape[-1]))
+
+    for i, img in enumerate(ref_imgs):
+        save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.exr', res)
+    ref_imgs = np.array(ref_imgs)
 print('Finished')
 
 print('Rendering initial images...')
 scene = Scene(scene_info['src'])
 scene.reload_mat(key, load_img('data/meshes/texture_kd.exr'))
+scene.reload_envmap(load_img('data/envmaps/source_envmap.exr'))
 scene.set_opts(res, 32, sppe=0, sppse=0)
 init_imgs = scene.renderC(integrator)
 init_masks = scene.renderC(integrator_mask)
@@ -64,25 +105,24 @@ for i, (img, mask) in enumerate(zip(init_imgs, init_masks)):
 del init_imgs, init_masks, scene
 print("Finished")
 
-ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
-ref_masks = torch.stack([torch.from_numpy(mask).cuda() for mask in ref_masks])
-trainset = DatasetMesh(sensor_ids, ref_imgs, ref_masks)
 print('Loading checkpoint...')
 if start_itr != 0:
-    v, start_itr = load_ckp(f'{outdir}/optimized/vertex_positions.*.pt', start_itr)
-    if v is not None:
-        texture = load_img(f'{outdir}/optimized/texture_kd.{start_itr}.exr')
+    ckp, start_itr = load_ckp(f'{outdir}/optimized/ckp.*.tar', start_itr)
+    if ckp is not None:
         print(f'Loaded checkpoint from epoch {start_itr}')
     else:
-        texture = None
+        ckp = {}
 else:
-    v = texture = None
+    ckp = {}
 print('Finished')
+
 scene = Scene(scene_info['src'])
-if v is None: 
+print('Initializing parameters...')
+if ckp.get('vertex_positions') is None: 
     v, f = scene.get_mesh(key)
     v, f = torch.from_numpy(v).cuda(), torch.from_numpy(f).cuda()
 else:
+    v = ckp['vertex_positions']
     _, f = scene.get_mesh(key)
     f = torch.from_numpy(f).cuda()
 with torch.no_grad():
@@ -90,14 +130,38 @@ with torch.no_grad():
     u: torch.Tensor = to_differential(M, v)
     L = laplacian_uniform(v.shape[0], f)
 u.requires_grad_()
-if texture is None:
+if ckp.get('mat') is None:
     texture = load_img('data/meshes/texture_kd.exr')
-scene.reload_mat(key, texture)
-scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
-texture = torch.from_numpy(texture).reshape(-1,3).cuda().contiguous()
+    mat_res = texture.shape[:2]
+    mat_res = (mat_res[1], mat_res[0])
+    texture = torch.from_numpy(texture).reshape(-1,3).cuda().contiguous()
+else:
+    texture = ckp['mat']
+    mat_res = ckp['mat_res']
+if ckp.get('envmap') is None:
+    envmap = load_img('data/envmaps/source_envmap.exr')
+    env_res = envmap.shape[:2]
+    env_res = (env_res[1], env_res[0])
+    envmap = torch.from_numpy(envmap).reshape(-1,3).cuda().contiguous()
+else:
+    envmap = ckp['envmap']
+    env_res = ckp['env_res']
 texture.requires_grad_()
+envmap.requires_grad_()
+print('Finished')
+
 opt_geom = AdamUniform([u], lr)
-opt_mat = Adam([texture], lr)
+if ckp.get('optimizer_geom') is not None:
+    opt_geom.load_state_dict(ckp['optimizer_geom'])
+opt_mat = Adam([texture, envmap], lr)
+if ckp.get('optimizer_mat') is not None:
+    opt_mat.load_state_dict(ckp['optimizer_mat'])
+
+scene.reload_mat(key, texture.reshape(mat_res[1], mat_res[0], -1))
+scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], -1))
+scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
+ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
+trainset = DatasetMesh(range(n_sensors), ref_imgs)
 img_losses = []
 reg_losses = []
 mask_losses = []
@@ -105,14 +169,16 @@ distances = []
 
 for it in tqdm(range(start_itr, start_itr + n_itr)):
     img_loss_, mask_loss_ = 0., 0.
-    for ids, ref_imgs, ref_masks in DataLoader(trainset, batch_size, True):
+    for ids, ref_imgs in DataLoader(trainset, batch_size, True):
         v = from_differential(M, u, method='CG')
 
-        imgs = scene.renderDVAM(v, texture, key, integrator, integrator_mask, ids)
+        imgs = scene.renderDVAME(v, texture, envmap, key, integrator, integrator_mask, ids)
 
-        img_loss = loss_fn(imgs[0], ref_imgs)
-        mask_loss = functional.mse_loss(imgs[1], ref_masks)
-        loss = img_loss + mask_loss
+        img_loss = loss_fn(imgs[...,:3], ref_imgs[...,:3])
+        mask_loss = functional.mse_loss(imgs[...,3], ref_imgs[...,3])
+        white = envmap.mean(dim=-1, keepdim=True)
+        reg_loss_lgt = functional.l1_loss(envmap, white.expand(-1,3))
+        loss = img_loss + mask_loss + reg_loss_lgt
 
         opt_geom.zero_grad()
         opt_mat.zero_grad()
@@ -122,43 +188,54 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
 
         with torch.no_grad():
             texture.clamp_(0., 1.)
+            envmap.clamp_min_(0.)
             img_loss_ += img_loss
             mask_loss_ += mask_loss
             if it % 4 == 0:
                 for i, id in enumerate(ids):
-                    save_img(imgs[0][i], f'{outdir}/train/{id}/train.{it+1:04}.png', res)
-                    save_img(imgs[1][i], f'{outdir}/train/{id}/train_mask.{it+1:04}.exr', res)
+                    save_img(imgs[i,:,:3], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.png', res)
+                    save_img(imgs[i,:,3:], f'{outdir}/train/{sensor_ids[id]}/train_mask.{it+1:04}.exr', res)
 
     with torch.no_grad():
         if (it+1) % save_interval == 0:
-            torch.save(v.detach(), f'{outdir}/optimized/vertex_positions.{it+1}.pt')
-            save_img(texture, f'{outdir}/optimized/texture_kd.{it+1}.exr', (1024, 1024))
+            torch.save({
+                'vertex_positions': v.detach(),
+                'mat': texture.detach(),
+                'mat_res': mat_res,
+                'envmap': envmap.detach(),
+                'env_res': env_res,
+                'optimizer_geom': opt_geom.state_dict(),
+                'optimizer_mat': opt_mat.state_dict(),
+            }, f'{outdir}/optimized/ckp.{it+1}.tar')
         img_losses.append(img_loss_.cpu().numpy())
         mask_losses.append(mask_loss_.cpu().numpy())
         reg_losses.append(regularization_loss(L, v, True).cpu().numpy())
-        v, f = scene.get_mesh(key, True)
-        distances.append(hausdorff(v, f, ref_v, ref_f))
+        if ref_v is not None and ref_f is not None:
+            v, f = scene.get_mesh(key, True)
+            distances.append(hausdorff(v, f, ref_v, ref_f))
     # Remesh
-    # if it == FLAGS['remesh_itr']:
-    #     with torch.no_grad():
-    #         v = from_differential(M, u, method='CG')
-    #         _, f = scene.get_mesh(key)
-    #         v, f = remesh(v, torch.from_numpy(f).cuda())
-    #         scene.reload_mesh(key, v, f)
-    #         scene.set_opts(res, spp=32, sppe=0, sppse=0)
-    #         remesh_imgs = scene.renderC(integrator)
-    #         remesh_masks = scene.renderC(integrator_mask)
-    #         for i, id in enumerate(sensor_ids):
-    #             save_img(remesh_imgs[i], f'{outdir}/ref/remesh_{id}.png', res)
-    #             save_img(remesh_masks[i], f'{outdir}/ref/remeshmask_{id}.exr', res)
-    #         scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
-    #         v, f = scene.get_mesh(key)
-    #         v, f = torch.from_numpy(v).cuda(), torch.from_numpy(f).cuda()
-    #         M = compute_matrix(v, f, lambda_, alpha=alpha)
-    #         u: torch.Tensor = to_differential(M, v)
-    #         L = laplacian_uniform(v.shape[0], f)
-    #     u.requires_grad_()
-    #     opt = AdamUniform([u, texture], lr)
+    if (it+1) % FLAGS.get('remesh_interval') == 0 and (it+1 - start_itr) != n_itr:
+        with torch.no_grad():
+            v = from_differential(M, u, method='CG')
+            _, f = scene.get_mesh(key)
+            v, f = remesh(v, torch.from_numpy(f).cuda())
+            _, uv_idx, uvs = xatlas.parametrize(v.cpu().numpy(), f.cpu().numpy())
+            scene.reload_mesh(key, v, f.int(), uvs, uv_idx.astype(np.int32))
+            scene.set_opts(res, spp=32, sppe=0, sppse=0)
+            remesh_imgs = scene.renderC(integrator)
+            remesh_masks = scene.renderC(integrator_mask)
+            for i, id in enumerate(sensor_ids):
+                save_img(remesh_imgs[i], f'{outdir}/ref/remesh_{id}.png', res)
+                save_img(remesh_masks[i], f'{outdir}/ref/remeshmask_{id}.exr', res)
+            scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
+            v, f = scene.get_mesh(key)
+            v, f = torch.from_numpy(v).cuda(), torch.from_numpy(f).cuda()
+            M = compute_matrix(v, f, lambda_, alpha=alpha)
+            u: torch.Tensor = to_differential(M, v)
+            L = laplacian_uniform(v.shape[0], f)
+        u.requires_grad_()
+        opt_geom = AdamUniform([u], lr)
+        opt_mat = Adam([texture, envmap], lr)
 
 '''
 Save results
@@ -170,15 +247,17 @@ plt.yscale('log')
 plt.legend()
 plt.savefig(f'{outdir}/stats/losses_itr{it+1}_l{lambda_}_lr{lr}.png')
 plt.close()
-plt.plot(distances)
-plt.ylabel("Hausdorff Distance")
-plt.savefig(f'{outdir}/stats/distances_itr{it+1}_l{lambda_}_lr{lr}.png')
+if len(distances) != 0:
+    plt.plot(distances)
+    plt.ylabel("Hausdorff Distance")
+    plt.savefig(f'{outdir}/stats/distances_itr{it+1}_l{lambda_}_lr{lr}.png')
 
 with torch.no_grad():
     v = from_differential(M, u, method='CG')
     _, f, uvs, uv_idx = scene.get_mesh(key, return_uv=True)
     scene.reload_mesh(key, v, f, uvs, uv_idx)
-    scene.reload_mat(key, texture.reshape(1024, 1024, -1))
+    scene.reload_mat(key, texture.reshape(mat_res[1], mat_res[0], -1))
+    scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], -1))
     scene.set_opts(res, spp=32, sppe=0, sppse=0)
     imgs = scene.renderC(integrator)
     masks = scene.renderC(integrator_mask)
@@ -186,7 +265,8 @@ with torch.no_grad():
         save_img(imgs[i], f'{outdir}/optimized/itr{it+1}_{i}.png', res)
         save_img(masks[i], f'{outdir}/optimized/itr{it+1}_{i}_mask.exr', res)
     scene.dump(key, f'{outdir}/optimized/optimized_itr{it+1}_l{lambda_}_lr{lr}.obj')
-    save_img(texture, f'{outdir}/optimized/texture_kd_itr{it+1}_l{lambda_}_lr{lr}.exr', (1024, 1024))
+    save_img(texture, f'{outdir}/optimized/texture_kd_itr{it+1}_l{lambda_}_lr{lr}.exr', mat_res)
+    save_img(envmap, f'{outdir}/optimized/envmap_itr{it+1}_l{lambda_}_lr{lr}.exr', env_res)
 
 for id in sensor_ids:
     imgs2video(f"{outdir}/train/{id}/train.*.png", f"{outdir}/train/{id}.mp4", 30)
@@ -205,7 +285,7 @@ Issues:
         - Increase spp
     - Remeshing loses UVs (causing problems when jointly optimizing geometry and materials)
         - Look up instant meshes
-    - Training images too noisy
+    - Rendered images too noisy
         - Increase spp and res
     - The optimized textures are too noisy
 '''
@@ -223,17 +303,9 @@ Notes:
 
 '''
     TODO
-    - Add more scenes (with effects like indirect illumination, shadows, refractions, etc.)
-        - Increase number of views
-        - Try different materials
     - Use tonemapped colors in computing losses as in nvdiffrec instead of linear ones
     - Use scheduler during training
         - try to use exponential falloff
-    - Try real-world images
     - Implement upsampling and downsampling remesh algorithms
-    - *Jointly optimize shape and material*
-        - try different shading models
-        - try different coordinate networks
-        - use mipmapped textures
-        - remesh and upsample textures periodically during optimization
+        - remesh and upsample textures periodically during optimization  
 '''

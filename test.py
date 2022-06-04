@@ -1,14 +1,6 @@
 import os
-
-from zmq import device
-from geometry.obj import load_obj, write_obj
-
-from render.mlptexture import MLPTexture3D
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
-import sys
 
-import json
-import cv2
 import potpourri3d as pp3d
 from enoki.cuda_autodiff import Int32 as IntD, Float32 as FloatD, Vector3f as Vector3fD, Vector4f as Vector4fD, Matrix4f as Matrix4fD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
@@ -19,16 +11,13 @@ import polyscope as ps
 from torch.nn import functional
 import numpy as np
 import xml.etree.ElementTree as ET
-from GPUtil import showUtilization
-import igl
-import xatlas
 import matplotlib.pyplot as plt
-
+from geometry.obj import load_obj, write_obj
+from xml_util import keep_sensors, preprocess_scene, xmlfile2str
 from util import *
 from geometry.dmtet import *
 from geometry.util import remesh
-from render.util import gen_tex, rasterize, sample, wrap, flip_x, flip_y
-import nvdiffrast.torch as dr
+from render.util import gen_tex, sample, wrap, flip_x, flip_y
 
 def test_mem_capacity(res, spp):
     integrator = psdr_cuda.DirectIntegrator(1, 1)
@@ -120,7 +109,5 @@ def test_vert_color():
     img = scene.renderC(psdr_cuda.DirectIntegrator(), [2])
     save_img(img[0], 'img1.exr', (320, 180))
 
-display_meshes([
-    'data/meshes/source.obj',
-    'output/spot_env/optimized/optimized_itr1000_l19_lr0.01.obj'
-])
+
+prepare_for_mesh_opt('output/chair_dmtet/optimized/ckp.500.tar', 64, 2.5)
