@@ -110,4 +110,6 @@ def test_vert_color():
     save_img(img[0], 'img1.exr', (320, 180))
 
 
-prepare_for_mesh_opt('output/chair_dmtet/optimized/ckp.500.tar', 64, 2.5)
+prepare_for_mesh_opt('output/lego_dmtet/optimized/ckp.1000.tar', 64, 2.5)
+# preprocess_nerf_synthetic('data/nerf_synthetic/lego/transforms_train.json',
+#                             'data/scenes/nerf_synthetic/lego.xml')

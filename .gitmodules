@@ -4,3 +4,6 @@
 [submodule "ext/psdr-cuda"]
 	path = ext/psdr-cuda
 	url = https://github.com/uguuuuuu/psdr-cuda.git
+[submodule "ext/large-steps-pytorch"]
+	path = ext/large-steps-pytorch
+	url = https://github.com/rgl-epfl/large-steps-pytorch.git

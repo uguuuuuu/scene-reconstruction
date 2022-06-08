@@ -13,8 +13,8 @@
     "learning_rate": 0.01,
     "lambda": 19,
     "alpha": 0,
-    "n_itr": 500,
+    "n_itr": 1000,
     "start_itr": -1,
     "save_interval": 250,
-    "remesh_interval": 250
+    "remesh_interval": 400
 }

@@ -22,7 +22,7 @@ from xml_util import keep_sensors, preprocess_scene
 from dataset import DatasetMesh
 from geometry.util import laplacian_uniform, regularization_loss, remesh
 
-FLAGS = json.load(open('configs/nerf_synthetic/chair.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/lego.json', 'r'))
 batch_size = FLAGS['batch_size']
 start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
 key = FLAGS['key']
@@ -110,6 +110,7 @@ if start_itr != 0:
     ckp, start_itr = load_ckp(f'{outdir}/optimized/ckp.*.tar', start_itr)
     if ckp is not None:
         print(f'Loaded checkpoint from epoch {start_itr}')
+        print
     else:
         ckp = {}
 else:
@@ -119,12 +120,13 @@ print('Finished')
 scene = Scene(scene_info['src'])
 print('Initializing parameters...')
 if ckp.get('vertex_positions') is None: 
-    v, f = scene.get_mesh(key)
+    v, f, uvs, uv_idx = scene.get_mesh(key, return_uv=True)
     v, f = torch.from_numpy(v).cuda(), torch.from_numpy(f).cuda()
 else:
     v = ckp['vertex_positions']
-    _, f = scene.get_mesh(key)
-    f = torch.from_numpy(f).cuda()
+    f = ckp['faces']
+    uvs = ckp['uvs']
+    uv_idx = ckp['uv_idx']
 with torch.no_grad():
     M = compute_matrix(v, f, lambda_, alpha=alpha)
     u: torch.Tensor = to_differential(M, v)
@@ -157,6 +159,7 @@ opt_mat = Adam([texture, envmap], lr)
 if ckp.get('optimizer_mat') is not None:
     opt_mat.load_state_dict(ckp['optimizer_mat'])
 
+scene.reload_mesh(key, v, f, uvs, uv_idx)
 scene.reload_mat(key, texture.reshape(mat_res[1], mat_res[0], -1))
 scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], -1))
 scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
@@ -170,7 +173,7 @@ distances = []
 for it in tqdm(range(start_itr, start_itr + n_itr)):
     img_loss_, mask_loss_ = 0., 0.
     for ids, ref_imgs in DataLoader(trainset, batch_size, True):
-        v = from_differential(M, u, method='CG')
+        v = from_differential(M, u)
 
         imgs = scene.renderDVAME(v, texture, envmap, key, integrator, integrator_mask, ids)
 
@@ -198,8 +201,12 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
 
     with torch.no_grad():
         if (it+1) % save_interval == 0:
+            _, f, uvs, uv_idx = scene.get_mesh(key, return_uv=True)
             torch.save({
                 'vertex_positions': v.detach(),
+                'faces': torch.from_numpy(f).cuda(),
+                'uvs': torch.from_numpy(uvs).cuda(),
+                'uv_idx': torch.from_numpy(uv_idx).cuda(),
                 'mat': texture.detach(),
                 'mat_res': mat_res,
                 'envmap': envmap.detach(),
@@ -216,7 +223,7 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
     # Remesh
     if (it+1) % FLAGS.get('remesh_interval') == 0 and (it+1 - start_itr) != n_itr:
         with torch.no_grad():
-            v = from_differential(M, u, method='CG')
+            v = from_differential(M, u)
             _, f = scene.get_mesh(key)
             v, f = remesh(v, torch.from_numpy(f).cuda())
             _, uv_idx, uvs = xatlas.parametrize(v.cpu().numpy(), f.cpu().numpy())
@@ -227,6 +234,10 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             for i, id in enumerate(sensor_ids):
                 save_img(remesh_imgs[i], f'{outdir}/ref/remesh_{id}.png', res)
                 save_img(remesh_masks[i], f'{outdir}/ref/remeshmask_{id}.exr', res)
+            scene = Scene(scene_info['src'])
+            scene.reload_mesh(key, v, f.int(), uvs, uv_idx.astype(np.int32))
+            scene.reload_mat(key, texture.reshape(mat_res[1], mat_res[0], -1))
+            scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], -1))
             scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt)
             v, f = scene.get_mesh(key)
             v, f = torch.from_numpy(v).cuda(), torch.from_numpy(f).cuda()
@@ -253,7 +264,7 @@ if len(distances) != 0:
     plt.savefig(f'{outdir}/stats/distances_itr{it+1}_l{lambda_}_lr{lr}.png')
 
 with torch.no_grad():
-    v = from_differential(M, u, method='CG')
+    v = from_differential(M, u)
     _, f, uvs, uv_idx = scene.get_mesh(key, return_uv=True)
     scene.reload_mesh(key, v, f, uvs, uv_idx)
     scene.reload_mat(key, texture.reshape(mat_res[1], mat_res[0], -1))
@@ -262,8 +273,8 @@ with torch.no_grad():
     imgs = scene.renderC(integrator)
     masks = scene.renderC(integrator_mask)
     for i in range(n_sensors):
-        save_img(imgs[i], f'{outdir}/optimized/itr{it+1}_{i}.png', res)
-        save_img(masks[i], f'{outdir}/optimized/itr{it+1}_{i}_mask.exr', res)
+        save_img(imgs[i], f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}.png', res)
+        save_img(masks[i], f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}_mask.exr', res)
     scene.dump(key, f'{outdir}/optimized/optimized_itr{it+1}_l{lambda_}_lr{lr}.obj')
     save_img(texture, f'{outdir}/optimized/texture_kd_itr{it+1}_l{lambda_}_lr{lr}.exr', mat_res)
     save_img(envmap, f'{outdir}/optimized/envmap_itr{it+1}_l{lambda_}_lr{lr}.exr', env_res)

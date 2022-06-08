@@ -22,7 +22,7 @@ from render.mlptexture import MLPTexture3D
 from render.util import scale_img
 from xml_util import keep_sensors, preprocess_scene
 
-FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/lego_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
