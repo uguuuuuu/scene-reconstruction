@@ -1,0 +1,20 @@
+{
+    "name": "drums_dmtet",
+    "scene_file": "data/scenes/nerf_synthetic/drums.xml",
+    "ref_dir": "data/nerf_synthetic/drums/train",
+    "key": "Mesh[0]",
+    "batch_size": 2,
+    "n_sensors": 16,
+    "res": [200, 200],
+    "env_res": [512, 256],
+    "spp_opt": 4,
+    "loss_fn": "l1",
+    "tonemap": true,
+    "learning_rate": 0.001,
+    "sdf_weight": 0.2,
+    "tet_res": 64,
+    "tet_scale": 2.5,
+    "n_itr": 500,
+    "start_itr": -1,
+    "save_interval": 250
+}

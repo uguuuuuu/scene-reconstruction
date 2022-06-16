@@ -314,9 +314,10 @@ Notes:
 
 '''
     TODO
-    - Use tonemapped colors in computing losses as in nvdiffrec instead of linear ones
     - Use scheduler during training
         - try to use exponential falloff
     - Implement upsampling and downsampling remesh algorithms
-        - remesh and upsample textures periodically during optimization  
+        - remesh and upsample textures periodically during optimization
+        - implement instant mesh
+    - Implement the albedo smoothness regularizer as in nvdiffrec
 '''

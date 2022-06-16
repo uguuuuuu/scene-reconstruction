@@ -22,7 +22,7 @@ from render.mlptexture import MLPTexture3D
 from render.util import scale_img
 from xml_util import keep_sensors, preprocess_scene
 
-FLAGS = json.load(open('configs/nerf_synthetic/lego_dmtet.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
@@ -31,6 +31,7 @@ res, env_res = FLAGS['res'], FLAGS['env_res']
 spp_ref, spp_opt = FLAGS.get('spp_ref'), FLAGS['spp_opt']
 loss_fn = get_loss_fn(FLAGS['loss_fn'], FLAGS['tonemap'])
 start_itr, n_itr, save_interval = FLAGS['start_itr'], FLAGS['n_itr'], FLAGS['save_interval']
+shading_model = FLAGS['shading_model']
 ref_dir = FLAGS.get('ref_dir')
 outdir = f"output/{FLAGS['name']}"
 SDF_PATH = f'{outdir}/optimized/sdf.obj'
@@ -85,7 +86,7 @@ if ref_dir is None:
 else:
     filenames = next(os.walk(ref_dir), (None, None, []))[2]
     if len(filenames) == 0:
-        raise FileNotFoundError('Nothing in the directory containing reference images!')
+        raise FileNotFoundError('Nothing in the reference image directory!')
     def extract_number(key: str):
         number = ''
         for c in key:
@@ -110,8 +111,13 @@ print('Finished')
 
 print('Initializing parameters...')
 dmtet = DMTetGeometry(tet_res, tet_scale, ckp.get('sdf'), ckp.get('deform'))
-kd_min, kd_max = torch.tensor([0., 0., 0.], device='cuda'), torch.tensor([1., 1., 1.], device='cuda')
-material = MLPTexture3D(dmtet.getAABB(), min_max=torch.stack([kd_min, kd_max]))
+if shading_model == 'diffuse':
+    mat_min = torch.zeros(3, dtype=torch.float32, device='cuda')
+    mat_max = torch.ones(3, dtype=torch.float32, device='cuda')
+else:
+    mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda')
+    mat_max = torch.tensor([1., 1., 10., 10., 10., 10., 10., 10., 1., 1., 1.], device='cuda')
+material = MLPTexture3D(dmtet.getAABB(), min_max=torch.stack([mat_min, mat_max]), channels=mat_min.size(0))
 if ckp.get('mat') is not None:
     material.load_state_dict(ckp['mat'])
     material.train()
@@ -153,7 +159,7 @@ scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.to(torch.int32))
 scene.reload_mat(key, dmtet.getMesh().material)
 scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
-scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=spp_opt) 
+scene.set_opts(res, spp=spp_opt, sppe=spp_opt)
 img_losses = []
 mask_losses = []
 reg_losses = []
@@ -162,17 +168,23 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
     img_loss_ = mask_loss_ = reg_loss_ = 0.
     for ids, ref_imgs in DataLoader(trainset, batch_size, True):
 
+        m = dmtet.getMesh()
+        d_mat = material.sample(m.v_pos + torch.normal(mean=0, std=0.01, size=m.v_pos.shape, device="cuda")) \
+            - m.material
+        reg_mat = torch.mean(d_mat[...,-3:]) * 0.03 * min(1.0, it / 500)
+
         imgs = dmtet(lambda v, mat: scene.renderDVAME(v, mat, envmap, key, integrator, integrator_mask, ids))
 
         img_loss = loss_fn(imgs[...,:3], ref_imgs[...,:3])
         mask_loss = functional.mse_loss(imgs[...,3], ref_imgs[...,3])
-        reg_loss = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
+        reg_sdf = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
         white = envmap.mean(dim=-1, keepdim=True)
-        reg_loss_lgt = functional.l1_loss(envmap, white.expand(-1,3))
+        reg_lgt = functional.l1_loss(envmap, white.expand(-1,3))
         loss = img_loss + \
             mask_loss + \
-            reg_loss * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000)) + \
-            reg_loss_lgt
+            reg_sdf * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000)) + \
+            reg_lgt + \
+            reg_mat
 
         opt.zero_grad()
         loss.backward()
@@ -188,7 +200,7 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             scene.reload_mat(key, m.material, res_only=True)
             img_loss_ += img_loss
             mask_loss_ += mask_loss
-            reg_loss_ += reg_loss
+            reg_loss_ += reg_sdf
             if it % 2 == 0:
                 for i, id in enumerate(ids):
                     save_img(imgs[i,:,:3], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.exr', res)
@@ -248,16 +260,15 @@ for id in sensor_ids:
 
 '''
 Issues:
-    - After the first 100 iterations, the surface does not change much
-    during the following optimization (trapped in a local minimum)
-        - Increase res of tet grid (too costly)
-            - Currently 64
-        - Increase spp and res of reference images
-            - Significantly improved the reconstructed geometry
-            - Highest possible is res (320, 180) and spp 128
-        - Train for more iterations (nvdiffrec trains for 5,000 iterations)
-    - Internal geometry
-        - Set the learning rate to be high at the beginning and then fall off exponentially 
+    - Using the current shading model (rough conductor) causes the material gradients to be too large
+    sometimes (-/+inf), causing the program to crash and producing low-quality gradients
+        - current solution: log-tonemap before calculating loss + smoothness regularizer + clamp
+        - things to try:
+            - increase the batch size
+            - increase spp
+            - log-tonemap before calculating loss
+            - use smoothness regularizer to regularize the material
+            - decrease learning rate
 '''
 
 '''
@@ -268,4 +279,6 @@ TODO
     - Experiment with different shading models
     - Experiment with different datasets
     - Validate after training
+    - Implement a denoiser
+    - demodulate lighting: separate lighting and reflectance
 '''

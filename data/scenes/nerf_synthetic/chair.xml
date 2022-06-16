@@ -908,8 +908,15 @@
 		</transform>
 	</sensor>
 	<!--Materials-->
+	<!-- <bsdf type="roughconductor" id="opt_mat">
+		<float name="alpha" value="0" />
+		<rgb name="eta" value="1, 1, 1" />
+		<rgb name="k" value="0, 0, 0" />
+		<rgb name="specular_reflectance" value="1, 1, 1" />
+		<string name='distribution' value='ggx'/>
+	</bsdf> -->
 	<bsdf type="diffuse" id="opt_mat">
-		<rgb name="reflectance" value="1, 0, 0" />
+		<rgb name="reflectance" value="1, 0, 0"/>
 	</bsdf>
 	<!--Emitters-->
 	<emitter type="envmap">

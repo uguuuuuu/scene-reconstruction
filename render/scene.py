@@ -83,15 +83,30 @@ class Scene:
             # flip to make res = (w, h)
             res = (res[1], res[0])
 
-        m.bsdf.reflectance.resolution = res
+        if type(m.bsdf) == psdr_cuda.DiffuseBSDF:
+            m.bsdf.reflectance.resolution = res
+        else:
+            m.bsdf.alpha_u.resolution = res
+            m.bsdf.alpha_v.resolution = res
+            m.bsdf.eta.resolution = res
+            m.bsdf.k.resolution = res
+            m.bsdf.specular_reflectance.resolution = res
         if not res_only:
-            m.bsdf.reflectance.data = Vector3fD(mat.reshape(-1,3))
+            if type(m.bsdf) == psdr_cuda.DiffuseBSDF:
+                m.bsdf.reflectance.data = Vector3fD(mat.reshape(-1,3))
+            else:
+                m.bsdf.alpha_u.data = FloatD(mat[...,0:1].reshape(-1))
+                m.bsdf.alpha_v.data = FloatD(mat[...,1:2].reshape(-1))
+                m.bsdf.eta.data = Vector3fD(mat[...,2:5].reshape(-1,3))
+                m.bsdf.k.data = Vector3fD(mat[...,5:8].reshape(-1,3))
+                m.bsdf.specular_reflectance.data = Vector3fD(mat[...,8:].reshape(-1,3))
     
     def reload_envmap(self, data):
         res = data.shape[:2]
         res = (res[1], res[0])
         assert(res[0] == 2*res[1])
 
+        # Assume the environment map is the first emitter
         envmap = self._scene.param_map['Emitter[0]']
         envmap.radiance.resolution = res
         envmap.radiance.data = Vector3fD(data.reshape(-1,3))

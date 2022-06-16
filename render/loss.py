@@ -20,7 +20,7 @@ def _RELMSE(img, target, eps=0.1):
 
 def get_loss_fn(loss_fn, tonemap=False):
     if tonemap:
-        tonemapper = _tonemap_srgb
+        tonemapper = lambda x: _tonemap_srgb(torch.log(torch.clamp(x, min=0, max=65535) + 1))
     else:
         tonemapper = lambda x: x
         

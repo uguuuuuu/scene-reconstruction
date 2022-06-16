@@ -1,8 +1,12 @@
 import os
+
+from zmq import device
+
+from denoise.oidn.load_denoiser import load_denoiser
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 import potpourri3d as pp3d
-from enoki.cuda_autodiff import Int32 as IntD, Float32 as FloatD, Vector3f as Vector3fD, Vector4f as Vector4fD, Matrix4f as Matrix4fD
+from enoki.cuda_autodiff import Int32 as IntD, Float32 as FloatD, Vector3m as Vector3mD, Vector2f as Vector2fD, Vector3f as Vector3fD, Vector4f as Vector4fD, Matrix4f as Matrix4fD
 from enoki.cuda import Float32 as FloatC, Vector3f as Vector3fC, Matrix4f as Matrix4fC
 import psdr_cuda
 from torch.utils.data import DataLoader
@@ -110,6 +114,48 @@ def test_vert_color():
     save_img(img[0], 'img1.exr', (320, 180))
 
 
-prepare_for_mesh_opt('output/lego_dmtet/optimized/ckp.1000.tar', 64, 2.5)
-# preprocess_nerf_synthetic('data/nerf_synthetic/lego/transforms_train.json',
-#                             'data/scenes/nerf_synthetic/lego.xml')
+# prepare_for_mesh_opt('output/lego_dmtet/optimized/ckp.1000.tar', 64, 2.5)
+# preprocess_nerf_synthetic('data/nerf_synthetic/drums/transforms_train.json',
+#                             'data/scenes/nerf_synthetic/drums.xml')
+
+# scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+# scene = Scene(scene_info['tgt'])
+# albedo = scene._scene.param_map['Mesh[0]'].bsdf.reflectance
+# res = (1920, 1080)
+# scene.set_opts(res, spp=1)
+# integrator = psdr_cuda.DirectIntegrator()
+# integrator_normal = psdr_cuda.FieldExtractionIntegrator('shNormal')
+# integrator_uv = psdr_cuda.FieldExtractionIntegrator('uv')
+# integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
+
+# imgs = scene.renderC(integrator, [0])
+# imgs_normal = scene.renderC(integrator_normal, [0])
+# imgs_uv = scene.renderC(integrator_uv, [0])
+# imgs_mask = scene.renderC(integrator_mask, [0])
+
+# for i in range(len(imgs)):
+#     save_img(imgs[i], f'img{i}.exr', res)
+#     save_img(imgs_normal[i], f'img{i}_normal.exr', res)
+#     save_img(imgs_uv[i], f'img{i}_uv.exr', res)
+#     save_img(imgs_mask[i], f'img{i}_mask.exr', res)
+#     mask = Vector3fD(imgs_mask[i]) > 0.
+#     uvs = Vector2fD(imgs_uv[i][:,:2])
+#     img_albedo = albedo.eval(uvs)
+#     img_albedo = ek.select(mask, img_albedo, 0.)
+#     save_img(img_albedo, f'img{i}_albedo.exr', res)
+
+denoiser = load_denoiser('hdr_alb_nrm')
+
+img = load_img('img0.exr')
+alb = load_img('img0_albedo.exr')
+nrm = load_img('img0_normal.exr')
+
+res = img.shape[:2]
+res = (res[1], res[0])
+img = torch.from_numpy(img).cuda()
+alb = torch.from_numpy(alb).cuda()
+nrm = torch.from_numpy(nrm).cuda()
+input = torch.cat([img, alb, nrm], dim=-1)
+
+output = denoiser(input)
+save_img(output, 'denoised.exr', res)
