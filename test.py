@@ -118,12 +118,12 @@ def test_vert_color():
 # preprocess_nerf_synthetic('data/nerf_synthetic/drums/transforms_train.json',
 #                             'data/scenes/nerf_synthetic/drums.xml')
 
-# scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
-# scene = Scene(scene_info['tgt'])
+scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+scene = Scene(scene_info['tgt'])
 # albedo = scene._scene.param_map['Mesh[0]'].bsdf.reflectance
-# res = (1920, 1080)
-# scene.set_opts(res, spp=1)
-# integrator = psdr_cuda.DirectIntegrator()
+res = (1920, 1080)
+scene.set_opts(res, spp=1)
+integrator = psdr_cuda.DirectIntegrator()
 # integrator_normal = psdr_cuda.FieldExtractionIntegrator('shNormal')
 # integrator_uv = psdr_cuda.FieldExtractionIntegrator('uv')
 # integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
@@ -144,18 +144,28 @@ def test_vert_color():
 #     img_albedo = ek.select(mask, img_albedo, 0.)
 #     save_img(img_albedo, f'img{i}_albedo.exr', res)
 
-denoiser = load_denoiser('hdr_alb_nrm')
+v, f = scene.get_mesh('Mesh[0]')
+print(v.shape)
+scene.reload_mesh('Mesh[0]', v, f)
+mat = np.zeros_like(v, dtype=np.float32)
+mat[...,0] = 1.
+print(mat.shape)
+scene.reload_mat('Mesh[0]', mat)
+imgs = scene.renderC(integrator, [0])
+save_img(imgs[0], 'img1.exr', res)
 
-img = load_img('img0.exr')
-alb = load_img('img0_albedo.exr')
-nrm = load_img('img0_normal.exr')
+# denoiser = load_denoiser('hdr_alb_nrm')
 
-res = img.shape[:2]
-res = (res[1], res[0])
-img = torch.from_numpy(img).cuda()
-alb = torch.from_numpy(alb).cuda()
-nrm = torch.from_numpy(nrm).cuda()
-input = torch.cat([img, alb, nrm], dim=-1)
+# img = load_img('img0.exr')
+# alb = load_img('img0_albedo.exr')
+# nrm = load_img('img0_normal.exr')
 
-output = denoiser(input)
-save_img(output, 'denoised.exr', res)
+# res = img.shape[:2]
+# res = (res[1], res[0])
+# img = torch.from_numpy(img).cuda()
+# alb = torch.from_numpy(alb).cuda()
+# nrm = torch.from_numpy(nrm).cuda()
+# input = torch.cat([img, alb, nrm], dim=-1)
+
+# output = denoiser(input)
+# save_img(output, 'denoised.exr', res)
