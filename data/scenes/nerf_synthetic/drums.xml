@@ -909,12 +909,15 @@
 	</sensor>
 	<!--Materials-->
 	<bsdf type="roughconductor" id="opt_mat">
-		<float name="alpha" value="0" />
-		<rgb name="eta" value="1, 1, 1" />
+		<float name="alpha" value="0.5" />
+		<rgb name="eta" value="1.5, 1.5, 1.5" />
 		<rgb name="k" value="0, 0, 0" />
 		<rgb name="specular_reflectance" value="1, 1, 1" />
 		<string name='distribution' value='ggx'/>
 	</bsdf>
+	<!-- <bsdf type="diffuse" id="opt_mat">
+		<rgb name="reflectance" value="1, 0, 0"/>
+	</bsdf> -->
 	<!--Emitters-->
 	<emitter type="envmap">
 		<string name="filename" value="./data/envmaps/kloppenheim_06_2k.exr" />

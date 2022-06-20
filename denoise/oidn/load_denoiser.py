@@ -30,23 +30,32 @@ def load_denoiser(input_type, device='cuda'):
 
     transfer_fn = PUTransferFunction()
     def denoise(input: torch.Tensor):
+        assert(input.dim() == 4)
+        image = input.clone()
         if input_type == 'hdr_nrm' or input_type == 'hdr_alb_nrm':
-            input[...,-3:] = (input[...,-3:] + 1.) / 2.
-        exposure = autoexposure(input)
-        input[...,:3] *= exposure
-        input = input.permute(2,0,1) # (H, W, C) -> (C, H, W)
-        input = input[None,...] # Add a batch dimension
-        input[:,:3,...] = transfer_fn.forward(input[:,:3,...])
-        shape = input.shape
-        input = F.pad(input, (0, round_up(shape[3], model.alignment) - shape[3],
+            nrm = image[...,-3:]
+            nrm = nrm + 1
+            nrm = nrm / 2
+            image[...,-3:] = nrm
+
+        exposure = autoexposure(image)
+        image = image.permute(0,3,1,2) # (N, H, W, C) -> (N, C, H, W)
+
+        color = image[:,:3,...]
+        color = color * exposure
+        color = transfer_fn.forward(color)
+        image[:,:3,...] = color
+
+        shape = image.shape
+        image = F.pad(image, (0, round_up(shape[3], model.alignment) - shape[3],
                           0, round_up(shape[2], model.alignment) - shape[2]))
 
-        output = model(input)
+        output = model(image)
         output = output[:, :, :shape[2], :shape[3]]
         output = torch.clamp(output, min=0.)
         output = transfer_fn.inverse(output)
         output /= exposure
 
-        return output.permute(0,2,3,1).squeeze(dim=0)
+        return output.permute(0,2,3,1)
 
     return denoise

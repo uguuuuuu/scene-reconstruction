@@ -10,11 +10,12 @@
     "spp_opt": 4,
     "loss_fn": "l1",
     "tonemap": true,
-    "learning_rate": 0.001,
+    "learning_rate": 0.005,
     "sdf_weight": 0.2,
     "tet_res": 64,
     "tet_scale": 2.5,
     "n_itr": 500,
     "start_itr": -1,
-    "save_interval": 250
+    "save_interval": 250,
+    "shading_model": "specular"
 }

@@ -89,18 +89,34 @@ PU_X0 =  2.23151711e-03
 PU_X1 =  3.70974749e-01
 
 def pu_forward(y):
-  return torch.where(y <= PU_Y0,
+  mask = y > PU_Y0
+  y = torch.where(y <= PU_Y0,
                      PU_A * y,
-                     torch.where(y <= PU_Y1,
-                                 PU_B * torch.pow(y, PU_C)  + PU_D,
-                                 PU_E * torch.log(y + PU_F) + PU_G))
+                     y)
+  y[mask] = torch.where(y[mask] <= PU_Y1,
+                          PU_B * torch.pow(y[mask], PU_C)  + PU_D,
+                          PU_E * torch.log(y[mask] + PU_F) + PU_G)
+  return y
+  # return torch.where(y <= PU_Y0,
+  #                    PU_A * y,
+  #                    torch.where(y <= PU_Y1,
+  #                                PU_B * torch.pow(y, PU_C)  + PU_D,
+  #                                PU_E * torch.log(y + PU_F) + PU_G))
 
 def pu_inverse(x):
-  return torch.where(x <= PU_X0,
+  mask = x > PU_X0
+  x = torch.where(x <= PU_X0,
                      x / PU_A,
-                     torch.where(x <= PU_X1,
-                                 torch.pow((x - PU_D) / PU_B, 1./PU_C),
-                                 torch.exp((x - PU_G) / PU_E) - PU_F))
+                     x)
+  x[mask] = torch.where(x[mask] <= PU_X1,
+                        torch.pow((x[mask] - PU_D) / PU_B, 1./PU_C),
+                        torch.exp((x[mask] - PU_G) / PU_E) - PU_F)
+  return x
+  # return torch.where(x <= PU_X0,
+  #                    x / PU_A,
+  #                    torch.where(x <= PU_X1,
+  #                                torch.pow((x - PU_D) / PU_B, 1./PU_C),
+  #                                torch.exp((x - PU_G) / PU_E) - PU_F))
 
 PU_NORM_SCALE = 1. / pu_forward(torch.tensor(HDR_Y_MAX)).item()
 
@@ -137,7 +153,7 @@ class LogTransferFunction(TransferFunction):
 # Computes an autoexposure value for a image
 def autoexposure(image):
   if type(image) == torch.Tensor:
-    image = image.cpu().numpy()
+    image = image.detach().cpu().numpy()
     
   key = 0.18
   eps = 1e-8

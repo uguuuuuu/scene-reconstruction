@@ -1,12 +1,13 @@
 import os
 import random
+
+from denoise.oidn.load_denoiser import load_denoiser
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from igl import hausdorff
-import psdr_cuda
 import torch
 from torch.optim import Adam
 from torch.nn import functional
@@ -22,7 +23,7 @@ from render.mlptexture import MLPTexture3D
 from render.util import scale_img
 from xml_util import keep_sensors, preprocess_scene
 
-FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/drums_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
@@ -68,14 +69,11 @@ os.makedirs(f'{outdir}/stats', exist_ok=True)
 os.makedirs(f'{outdir}/ref', exist_ok=True)
 os.makedirs(f'{outdir}/optimized', exist_ok=True)
 
-integrator = psdr_cuda.DirectIntegrator(bsdf_samples=1, light_samples=1)
-integrator.hide_emitters = True
-integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
 ref_v = ref_f = None
 print('Writing reference images...')
 if ref_dir is None:
-    scene, ref_imgs = renderC_img(scene_info['tgt'], integrator, res=res, spp=spp_ref)
-    scene, ref_masks = renderC_img(scene_info['tgt'], integrator_mask, res=res, spp=spp_ref)
+    scene, ref_imgs = renderC_img(scene_info['tgt'], res=res, spp=spp_ref, img_type='shaded')
+    scene, ref_masks = renderC_img(scene_info['tgt'], res=res, spp=spp_ref, img_type='mask')
     for i, (img, mask) in enumerate(zip(ref_imgs, ref_masks)):
         save_img(img, f'{outdir}/ref/ref_{sensor_ids[i]}.png', res)
         save_img(mask, f'{outdir}/ref/refmask_{sensor_ids[i]}.exr', res)
@@ -114,9 +112,11 @@ dmtet = DMTetGeometry(tet_res, tet_scale, ckp.get('sdf'), ckp.get('deform'))
 if shading_model == 'diffuse':
     mat_min = torch.zeros(3, dtype=torch.float32, device='cuda')
     mat_max = torch.ones(3, dtype=torch.float32, device='cuda')
+elif shading_model == 'specular':
+    mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda')
+    mat_max = torch.tensor([1., 5., 5., 5., 5., 5., 5., 1., 1., 1.], device='cuda')
 else:
-    mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda')
-    mat_max = torch.tensor([1., 1., 10., 10., 10., 10., 10., 10., 1., 1., 1.], device='cuda')
+    raise NotImplementedError('Unknown shading model')
 material = MLPTexture3D(dmtet.getAABB(), min_max=torch.stack([mat_min, mat_max]), channels=mat_min.size(0))
 if ckp.get('mat') is not None:
     material.load_state_dict(ckp['mat'])
@@ -137,8 +137,8 @@ scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.int())
 scene.reload_mat(key, dmtet.getMesh().material)
 scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
 scene.set_opts(res, 32, sppe=0, sppse=0)
-init_imgs = scene.renderC(integrator)
-init_masks = scene.renderC(integrator_mask)
+init_imgs = scene.renderC(img_type='shaded')
+init_masks = scene.renderC(img_type='mask')
 for i, (img, mask) in enumerate(zip(init_imgs, init_masks)):
     save_img(img, f'{outdir}/ref/init_{sensor_ids[i]}.png', res)
     save_img(mask, f'{outdir}/ref/initmask_{sensor_ids[i]}.exr', res)
@@ -148,12 +148,17 @@ print('Finished')
 
 ref_imgs = torch.stack([torch.from_numpy(img).cuda() for img in ref_imgs])
 trainset = DatasetMesh(range(n_sensors), ref_imgs)
-opt = Adam(list(dmtet.parameters())+list(material.parameters())+[envmap], lr)
-if ckp.get('optimizer') is not None:
-    opt.load_state_dict(ckp['optimizer'])
+opt_mat = Adam(material.parameters(), lr)
+opt_geom = Adam(dmtet.parameters(), lr * 1.5)
+opt_env = Adam([envmap], lr * 2)
+if ckp.get('optimizers') is not None:
+    opt_mat.load_state_dict(ckp['optimizers'][0])
+    opt_geom.load_state_dict(ckp['optimizers'][1])
+    opt_env.load_state_dict(ckp['optimizers'][2])
 # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda itr: lr_schedule(itr, 0))
 # if ckp.get('scheduler') is not None:
 #     scheduler.load_state_dict(ckp['scheduler'])
+denoiser = load_denoiser('hdr')
 
 scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.to(torch.int32))
@@ -171,12 +176,21 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
         m = dmtet.getMesh()
         d_mat = material.sample(m.v_pos + torch.normal(mean=0, std=0.01, size=m.v_pos.shape, device="cuda")) \
             - m.material
-        reg_mat = torch.mean(d_mat[...,-3:]) * 0.03 * min(1.0, it / 500)
+        reg_mat = torch.mean(d_mat[...,-3:]) * 0.03 * min(1.0, it / 1000)
 
-        imgs = dmtet(lambda v, mat: scene.renderDVAME(v, mat, envmap, key, integrator, integrator_mask, ids))
+        imgs = dmtet(lambda v, mat: scene.renderD(v, mat, envmap, key, ids))
+        # shape = imgs.shape
+        # assert(tuple(imgs.shape) == (batch_size, res[1]*res[0], 4))
+        # imgs = imgs.reshape(batch_size, res[1], res[0], -1)
+        # assert(tuple(imgs.shape) == (batch_size, res[1], res[0], 4))
+        # imgs_denoised = denoiser(imgs[...,:3])
+        # imgs_denoised = imgs[...,:3] * (1 - min(1, it / 1000)) + imgs_denoised * min(1, it / 1000)
+        # imgs = imgs.reshape(shape)
+        # imgs_denoised = imgs_denoised.reshape(batch_size, res[1]*res[0], 3)
+        imgs_denoised = imgs[...,:3]
 
-        img_loss = loss_fn(imgs[...,:3], ref_imgs[...,:3])
-        mask_loss = functional.mse_loss(imgs[...,3], ref_imgs[...,3])
+        img_loss = loss_fn(imgs_denoised, ref_imgs[...,:3])
+        mask_loss = functional.mse_loss(imgs[...,-1], ref_imgs[...,3])
         reg_sdf = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
         white = envmap.mean(dim=-1, keepdim=True)
         reg_lgt = functional.l1_loss(envmap, white.expand(-1,3))
@@ -186,9 +200,13 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             reg_lgt + \
             reg_mat
 
-        opt.zero_grad()
+        opt_mat.zero_grad()
+        opt_geom.zero_grad()
+        opt_env.zero_grad()
         loss.backward()
-        opt.step()
+        opt_mat.step()
+        opt_geom.step()
+        opt_env.step()
 
         m = dmtet.getMesh()
         v = m.v_pos
@@ -214,7 +232,7 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
                 'mat': material.state_dict(), 
                 'envmap': envmap.detach(),
                 'env_res': env_res,               
-                'optimizer': opt.state_dict(),
+                'optimizers': [opt_mat.state_dict(), opt_geom.state_dict(), opt_env.state_dict()],
                 'sensor_ids': sensor_ids,
                 # 'scheduler': scheduler.state_dict()
             }, f'{outdir}/optimized/ckp.{it+1}.tar')
@@ -230,14 +248,14 @@ dmtet.getMesh().material = material.sample(dmtet.getMesh().v_pos)
 scene.reload_mat(key, dmtet.getMesh().material)
 scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
 scene.set_opts(res, 32, sppe=0, sppse=0)
-opt_imgs = scene.renderC(integrator)
-opt_masks = scene.renderC(integrator_mask)
+opt_imgs = scene.renderC(img_type='shaded')
+opt_masks = scene.renderC(img_type='mask')
 for i, (img, mask) in enumerate(zip(opt_imgs, opt_masks)):
     save_img(img, f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}.png', res)
     save_img(mask, f'{outdir}/optimized/itr{it+1}_{sensor_ids[i]}_mask.exr', res)
 
 material.cleanup()
-del dmtet, material, opt, trainset, ref_imgs, scene
+del dmtet, material, opt_mat, opt_geom, opt_env, trainset, ref_imgs, scene
 torch.cuda.empty_cache()
 ek.cuda_malloc_trim()
 
@@ -266,9 +284,7 @@ Issues:
         - things to try:
             - increase the batch size
             - increase spp
-            - log-tonemap before calculating loss
-            - use smoothness regularizer to regularize the material
-            - decrease learning rate
+            - increase resolution
 '''
 
 '''
@@ -279,6 +295,8 @@ TODO
     - Experiment with different shading models
     - Experiment with different datasets
     - Validate after training
-    - Implement a denoiser
+    - Implement other denoisers
+        - the spatial component of SVGF as in Hasselgren et al. https://arxiv.org/abs/2206.03380
+        - the kernel-predicting neural denoiser as in Neural Temporal Adaptive Sampling and Denoising
     - demodulate lighting: separate lighting and reflectance
 '''

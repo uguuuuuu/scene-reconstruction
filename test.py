@@ -21,7 +21,7 @@ from xml_util import keep_sensors, preprocess_scene, xmlfile2str
 from util import *
 from geometry.dmtet import *
 from geometry.util import remesh
-from render.util import gen_tex, sample, wrap, flip_x, flip_y
+from render.util import gen_tex, sample, scale_img, wrap, flip_x, flip_y
 
 def test_mem_capacity(res, spp):
     integrator = psdr_cuda.DirectIntegrator(1, 1)
@@ -118,54 +118,112 @@ def test_vert_color():
 # preprocess_nerf_synthetic('data/nerf_synthetic/drums/transforms_train.json',
 #                             'data/scenes/nerf_synthetic/drums.xml')
 
-scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
-scene = Scene(scene_info['tgt'])
+# scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+# scene = Scene(scene_info['tgt'])
 # albedo = scene._scene.param_map['Mesh[0]'].bsdf.reflectance
-res = (1920, 1080)
-scene.set_opts(res, spp=1)
-integrator = psdr_cuda.DirectIntegrator()
-# integrator_normal = psdr_cuda.FieldExtractionIntegrator('shNormal')
-# integrator_uv = psdr_cuda.FieldExtractionIntegrator('uv')
-# integrator_mask = psdr_cuda.FieldExtractionIntegrator('silhouette')
+# res = (1920, 1080)
+# scene.set_opts(res, spp=1)
 
-# imgs = scene.renderC(integrator, [0])
-# imgs_normal = scene.renderC(integrator_normal, [0])
-# imgs_uv = scene.renderC(integrator_uv, [0])
+# imgs = scene.renderC([0], img_type='shaded')
+# imgs_normal = scene.renderC([0], img_type='normal')
+# imgs_alb = scene.renderC([0], img_type='albedo')
 # imgs_mask = scene.renderC(integrator_mask, [0])
 
 # for i in range(len(imgs)):
 #     save_img(imgs[i], f'img{i}.exr', res)
 #     save_img(imgs_normal[i], f'img{i}_normal.exr', res)
-#     save_img(imgs_uv[i], f'img{i}_uv.exr', res)
-#     save_img(imgs_mask[i], f'img{i}_mask.exr', res)
-#     mask = Vector3fD(imgs_mask[i]) > 0.
-#     uvs = Vector2fD(imgs_uv[i][:,:2])
-#     img_albedo = albedo.eval(uvs)
-#     img_albedo = ek.select(mask, img_albedo, 0.)
-#     save_img(img_albedo, f'img{i}_albedo.exr', res)
-
-v, f = scene.get_mesh('Mesh[0]')
-print(v.shape)
-scene.reload_mesh('Mesh[0]', v, f)
-mat = np.zeros_like(v, dtype=np.float32)
-mat[...,0] = 1.
-print(mat.shape)
-scene.reload_mat('Mesh[0]', mat)
-imgs = scene.renderC(integrator, [0])
-save_img(imgs[0], 'img1.exr', res)
+    # save_img(imgs_uv[i], f'img{i}_uv.exr', res)
+    # save_img(imgs_mask[i], f'img{i}_mask.exr', res)
+    # mask = Vector3fD(imgs_mask[i]) > 0.
+    # uvs = Vector2fD(imgs_uv[i][:,:2])
+    # img_albedo = albedo.eval(uvs)
+    # img_albedo = ek.select(mask, img_albedo, 0.)
+    # save_img(imgs_alb[i], f'img{i}_albedo.exr', res)
 
 # denoiser = load_denoiser('hdr_alb_nrm')
 
 # img = load_img('img0.exr')
 # alb = load_img('img0_albedo.exr')
 # nrm = load_img('img0_normal.exr')
+# img = scale_img(img, (540, 960)).cuda()
+# alb = scale_img(alb, (540, 960)).cuda()
+# nrm = scale_img(nrm, (540, 960)).cuda()
+
+# torch.autograd.set_detect_anomaly(True)
 
 # res = img.shape[:2]
 # res = (res[1], res[0])
-# img = torch.from_numpy(img).cuda()
-# alb = torch.from_numpy(alb).cuda()
-# nrm = torch.from_numpy(nrm).cuda()
 # input = torch.cat([img, alb, nrm], dim=-1)
+# input = input[None,...]
+# input.requires_grad_()
 
 # output = denoiser(input)
-# save_img(output, 'denoised.exr', res)
+# loss = output.mean()
+# loss.backward()
+# print(input.grad.mean())
+# save_img(output[0], 'denoised.exr', res)
+
+# class EnokiSquare(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, x):
+#         assert(x.requires_grad)
+#         ctx.x = FloatD(x)
+
+#         ek.set_requires_gradient(ctx.x)
+
+#         ctx.out = ctx.x * ctx.x
+
+#         return ctx.out.torch()
+
+#     @staticmethod
+#     def backward(ctx, grad_out):
+#         ek.set_gradient(ctx.out, FloatC(grad_out))
+
+#         FloatD.backward()
+
+#         grad_x = ek.gradient(ctx.x).torch()
+
+#         del ctx.x, ctx.out
+
+#         return grad_x
+# ek_sqr = EnokiSquare.apply
+
+# class EnokiCube(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, x):
+#         assert(x.requires_grad)
+#         ctx.x = FloatD(x)
+
+#         ek.set_requires_gradient(ctx.x)
+
+#         ctx.out = ctx.x * ctx.x * ctx.x
+
+#         return ctx.out.torch()
+
+#     @staticmethod
+#     def backward(ctx, grad_out):
+#         ek.set_gradient(ctx.out, FloatC(grad_out))
+
+#         FloatD.backward()
+
+#         grad_x = ek.gradient(ctx.x).torch()
+
+#         del ctx.x, ctx.out
+
+#         return grad_x
+# ek_cube = EnokiCube.apply
+
+# x = torch.arange(1, 11, dtype=torch.float32, device='cuda', requires_grad=True)
+# print(x)
+
+# x_2 = ek_sqr(x)
+# print(x_2)
+# x_3 = ek_cube(x)
+# print(x_3)
+
+# loss = torch.sum(x_2)
+# loss += torch.sum(x_3)
+
+# loss.backward()
+
+# print(x.grad)

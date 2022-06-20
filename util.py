@@ -156,20 +156,26 @@ def unique(x: torch.Tensor, dim=None):
     inverse, perm = inverse.flip([dim]), perm.flip([dim])
     return unique, inverse.new_empty(unique.size(dim)).scatter_(dim, inverse, perm)
 
-def renderC_img(xml, integrator, sensor_ids = None, res = (256, 256), spp = 32, load_string=True):
+def renderC_img(xml, sensor_ids = None, res = (256, 256), spp = 32, load_string=True, img_type='shaded'):
     if load_string == False: xml = xmlfile2str(xml)
     scene = Scene(xml)
     scene.set_opts(res, spp, sppe=0, sppse=0)
-    imgs = scene.renderC(integrator, sensor_ids)
+    imgs = scene.renderC(sensor_ids, img_type)
     assert(imgs is not None)
     return scene, imgs
 
-def prepare_for_mesh_opt(ckp_path, tet_res, tet_scale):
+def prepare_for_mesh_opt(ckp_path, tet_res, tet_scale, shading_model='diffuse'):
     ckp = torch.load(ckp_path)
     dmtet = DMTetGeometry(tet_res, tet_scale, ckp['sdf'], ckp['deform'])
-    kd_min, kd_max = [0., 0., 0.], [1., 1., 1.]
-    material = MLPTexture3D(dmtet.getAABB(),
-                min_max=torch.stack([torch.tensor(kd_min, device='cuda'), torch.tensor(kd_max, device='cuda')]))
+
+    if shading_model == 'diffuse':
+        mat_min = torch.zeros(3, dtype=torch.float32, device='cuda')
+        mat_max = torch.ones(3, dtype=torch.float32, device='cuda')
+    else:
+        mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda')
+        mat_max = torch.tensor([1., 5., 5., 5., 5., 5., 5., 1., 1., 1.], device='cuda')
+
+    material = MLPTexture3D(dmtet.getAABB(), min_max=torch.stack([mat_min, mat_max]))
     material.load_state_dict(ckp['mat'])
     material.eval()
     
@@ -283,6 +289,7 @@ def extract_texture(mesh, texture_3d, res=(1024,1024)):
     glctx = dr.RasterizeGLContext()
     rast, _ = dr.rasterize(glctx, uvs_, uv_idx, res)
     pos, _ = dr.interpolate(mesh.v_pos.contiguous(), rast, mesh.t_pos_idx.int())
+    print(pos.shape)
     tex = texture_3d.sample(pos[0])
     # del glctx
     
