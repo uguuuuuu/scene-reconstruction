@@ -1,7 +1,5 @@
 import os
 import random
-
-from denoise.oidn.load_denoiser import load_denoiser
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 import json
@@ -22,8 +20,12 @@ from render.scene import Scene
 from render.mlptexture import MLPTexture3D
 from render.util import scale_img
 from xml_util import keep_sensors, preprocess_scene
+import denoise.oidn as oidn
+import denoise.svgf as svgf
 
-FLAGS = json.load(open('configs/nerf_synthetic/drums_dmtet.json', 'r'))
+EPSILON = 1e-3
+
+FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
@@ -110,10 +112,10 @@ print('Finished')
 print('Initializing parameters...')
 dmtet = DMTetGeometry(tet_res, tet_scale, ckp.get('sdf'), ckp.get('deform'))
 if shading_model == 'diffuse':
-    mat_min = torch.zeros(3, dtype=torch.float32, device='cuda')
+    mat_min = torch.zeros(3, dtype=torch.float32, device='cuda') + EPSILON
     mat_max = torch.ones(3, dtype=torch.float32, device='cuda')
 elif shading_model == 'specular':
-    mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda')
+    mat_min = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device='cuda') + EPSILON
     mat_max = torch.tensor([1., 5., 5., 5., 5., 5., 5., 1., 1., 1.], device='cuda')
 else:
     raise NotImplementedError('Unknown shading model')
@@ -158,7 +160,8 @@ if ckp.get('optimizers') is not None:
 # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda itr: lr_schedule(itr, 0))
 # if ckp.get('scheduler') is not None:
 #     scheduler.load_state_dict(ckp['scheduler'])
-denoiser = load_denoiser('hdr')
+# denoiser = oidn.load_denoiser('hdr')
+denoiser = svgf.load_denoiser()
 
 scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.to(torch.int32))
@@ -178,27 +181,32 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             - m.material
         reg_mat = torch.mean(d_mat[...,-3:]) * 0.03 * min(1.0, it / 1000)
 
-        imgs = dmtet(lambda v, mat: scene.renderD(v, mat, envmap, key, ids))
-        # shape = imgs.shape
-        # assert(tuple(imgs.shape) == (batch_size, res[1]*res[0], 4))
-        # imgs = imgs.reshape(batch_size, res[1], res[0], -1)
-        # assert(tuple(imgs.shape) == (batch_size, res[1], res[0], 4))
-        # imgs_denoised = denoiser(imgs[...,:3])
-        # imgs_denoised = imgs[...,:3] * (1 - min(1, it / 1000)) + imgs_denoised * min(1, it / 1000)
-        # imgs = imgs.reshape(shape)
-        # imgs_denoised = imgs_denoised.reshape(batch_size, res[1]*res[0], 3)
-        imgs_denoised = imgs[...,:3]
+        imgs_demod, imgs_mask, imgs_alb, imgs_depth, imgs_nrm = dmtet(lambda v, mat: scene.renderD_demod(v, mat, envmap, key, ids))
+        # imgs = imgs_demod * imgs_alb
 
-        img_loss = loss_fn(imgs_denoised, ref_imgs[...,:3])
-        mask_loss = functional.mse_loss(imgs[...,-1], ref_imgs[...,3])
+        imgs_demod = imgs_demod.reshape(batch_size, res[1], res[0], 3)
+        imgs_depth = imgs_depth.reshape(batch_size, res[1], res[0], 3)
+        imgs_nrm = imgs_nrm.reshape(batch_size, res[1], res[0], 3)
+        imgs_denoised = denoiser(torch.cat([imgs_demod, torch.mean(imgs_depth, dim=-1, keepdim=True), imgs_nrm]), 3, lerp(1e-4, 2., min(1, it / 1750)), 1, 128)
+        # imgs_denoised = lerp(imgs_demod, imgs_denoised, min(1, it / 1000))
+
+        imgs_demod = imgs_demod.reshape(batch_size, res[1]*res[0], 3)
+        imgs_depth = imgs_depth.reshape(batch_size, res[1]*res[0], 3)
+        imgs_nrm = imgs_nrm.reshape(batch_size, res[1]*res[0], 3)
+        imgs_denoised = imgs_denoised.reshape(batch_size, res[1]*res[0], 3)
+        imgs = imgs_denoised * imgs_alb
+
+        img_loss = loss_fn(imgs, ref_imgs[...,:3])
+        mask_loss = functional.mse_loss(torch.mean(imgs_mask, dim=-1), ref_imgs[...,3])
         reg_sdf = sdf_reg_loss(dmtet.sdf, dmtet.all_edges).mean()
-        white = envmap.mean(dim=-1, keepdim=True)
-        reg_lgt = functional.l1_loss(envmap, white.expand(-1,3))
+        # white = envmap.mean(dim=-1, keepdim=True)
+        # reg_lgt = functional.l1_loss(envmap, white.expand(-1,3))
+        reg_lgt = lgt_reg_loss(imgs_demod, ref_imgs[...,:3])
         loss = img_loss + \
             mask_loss + \
             reg_sdf * (sdf_weight - (sdf_weight - 0.01) * min(1.0, it / 1000)) + \
-            reg_lgt + \
-            reg_mat
+            reg_lgt * 0.15 + \
+            reg_mat * 0.1
 
         opt_mat.zero_grad()
         opt_geom.zero_grad()
@@ -221,8 +229,11 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             reg_loss_ += reg_sdf
             if it % 2 == 0:
                 for i, id in enumerate(ids):
-                    save_img(imgs[i,:,:3], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.exr', res)
-                    save_img(imgs[i,:,3:], f'{outdir}/train/{sensor_ids[id]}/train_mask.{it+1:04}.exr', res)
+                    save_img(imgs[i], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.exr', res)
+                    save_img(imgs_demod[i], f'{outdir}/train/{sensor_ids[id]}/train_demod.{it+1:04}.exr', res)
+                    save_img(imgs_mask[i], f'{outdir}/train/{sensor_ids[id]}/train_mask.{it+1:04}.exr', res)
+                    save_img(imgs_alb[i], f'{outdir}/train/{sensor_ids[id]}/train_alb.{it+1:04}.exr', res)
+                    save_img(imgs_denoised[i], f'{outdir}/train/{sensor_ids[id]}/train_denoised.{it+1:04}.exr', res)
     # scheduler.step()
     with torch.no_grad():
         if (it+1)%save_interval == 0:
@@ -285,6 +296,10 @@ Issues:
             - increase the batch size
             - increase spp
             - increase resolution
+    - Lighting is partially baked in to the material
+        - use the light regularizer in Hasselgren et al. https://arxiv.org/abs/2206.03380
+    - Adding the oidn denoiser increases memory usage
+    - Optimization seems to not converge under the current configuration (res (200, 200), spp=sppe=2)
 '''
 
 '''
@@ -295,8 +310,8 @@ TODO
     - Experiment with different shading models
     - Experiment with different datasets
     - Validate after training
+    - Implement the Disney BRDF
     - Implement other denoisers
         - the spatial component of SVGF as in Hasselgren et al. https://arxiv.org/abs/2206.03380
         - the kernel-predicting neural denoiser as in Neural Temporal Adaptive Sampling and Denoising
-    - demodulate lighting: separate lighting and reflectance
 '''

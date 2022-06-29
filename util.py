@@ -67,12 +67,12 @@ def load_img(fname):
     if img.dtype == np.uint8:
         img = img.astype(np.float32)/255
         img = srgb2linear(img)
-    if img.dtype == np.uint16:
+    elif img.dtype == np.uint16:
         img = img.astype(np.float32)/65535
         img = srgb2linear(img)
 
     return img
-def save_img(img, fname, res: tuple):
+def save_img(img, fname, res=None):
     '''
     Save an image of linear color values to `fname`
     '''
@@ -85,8 +85,14 @@ def save_img(img, fname, res: tuple):
     elif t == torch.Tensor:
         img = img.detach().cpu().numpy()
 
+    if res is None:
+        assert(img.ndim == 3)
+        res = img.shape[:2]
+        res = (res[1], res[0])
+
     n_channels = img.shape[-1]
     if n_channels != 1 and n_channels !=3 and n_channels !=4:
+        assert(img.ndim == 1)
         n_channels = 1
     img = img.reshape((res[1], res[0], n_channels))
     if n_channels == 3:
@@ -155,6 +161,17 @@ def unique(x: torch.Tensor, dim=None):
     perm = torch.arange(inverse.size(dim), dtype=inverse.dtype, device=inverse.device)
     inverse, perm = inverse.flip([dim]), perm.flip([dim])
     return unique, inverse.new_empty(unique.size(dim)).scatter_(dim, inverse, perm)
+
+def lerp(a, b, t):
+    return a * (1 - t) + b * t
+
+def lgt_reg_loss(lgt, ref):
+    def linear2srgb(f):
+        return torch.where(f > 0.0031308, torch.pow(torch.clamp(f, min=0.0031308), 1.0/2.4)*1.055 - 0.055, 12.92*f)
+    def tonemap(x):
+        return linear2srgb(torch.log(torch.clamp(x, min=0, max=65535) + 1))
+
+    return functional.l1_loss(torch.mean(tonemap(lgt), dim=-1), torch.max(tonemap(ref), dim=-1)[0])
 
 def renderC_img(xml, sensor_ids = None, res = (256, 256), spp = 32, load_string=True, img_type='shaded'):
     if load_string == False: xml = xmlfile2str(xml)

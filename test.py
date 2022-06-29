@@ -1,8 +1,4 @@
 import os
-
-from zmq import device
-
-from denoise.oidn.load_denoiser import load_denoiser
 os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 
 import potpourri3d as pp3d
@@ -20,8 +16,10 @@ from geometry.obj import load_obj, write_obj
 from xml_util import keep_sensors, preprocess_scene, xmlfile2str
 from util import *
 from geometry.dmtet import *
-from geometry.util import remesh
+from geometry.util import remesh, transform_ek
 from render.util import gen_tex, sample, scale_img, wrap, flip_x, flip_y
+import denoise.oidn as oidn
+import denoise.svgf as svgf
 
 def test_mem_capacity(res, spp):
     integrator = psdr_cuda.DirectIntegrator(1, 1)
@@ -113,16 +111,211 @@ def test_vert_color():
     img = scene.renderC(psdr_cuda.DirectIntegrator(), [2])
     save_img(img[0], 'img1.exr', (320, 180))
 
+def test_demod():
+    scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+    scene = Scene(scene_info['tgt'])
+    res = (1280, 720)
+    scene.set_opts(res, spp=8)
+
+    img_demod0 = scene.renderC([0], 'demodulated')[0]
+    img1 = scene.renderC([0], 'shaded')[0]
+    img_mask = scene.renderC([0], 'mask')[0]
+    img_mask = np.broadcast_to(img_mask, [*img_mask.shape[:-1], 3])
+    img_alb = scene.renderC([0], 'albedo')[0]
+    mask = img_mask > 0.
+
+    img0 = np.copy(img_demod0)
+    img0[mask] = img0[mask] * img_alb[mask]
+    img_demod1 = np.copy(img1)
+    img_demod1[mask] = img_demod1[mask] / (img_alb[mask] + 1e-5)
+
+    denoiser = oidn.load_denoiser('hdr')
+    img_denoised = denoiser(torch.from_numpy(img_demod0.reshape(1, res[1], res[0], 3)).cuda())
+    
+    save_img(img_demod0, 'img_demod0.exr', res)
+    save_img(img0, 'img0.exr', res)
+    save_img(img1, 'img1.exr', res)
+    save_img(img_demod1, 'img_demod1.exr', res)
+    save_img(img_denoised[0], 'img_denoised.exr')
+
+def test_deriv(img):
+    device = img.device
+    img = img[None, ...]
+    shape = img.shape
+    res = (shape[2], shape[1])
+    img = torch.permute(img, (0, 3, 1, 2))
+
+    v, u = torch.meshgrid([torch.arange(0, res[1], dtype=torch.float32, device=device),
+                torch.arange(0, res[0], dtype=torch.float32, device=device)], indexing='ij')
+    u = u + 0.5
+    v = v + 0.5
+    h = 0.1
+
+    u0 = u - h
+    v0 = v - h
+    u1 = u + h
+    v1 = v + h
+    u = u / res[0]
+    u0 = u0 / res[0]
+    u1 = u1 / res[0]
+    v0 = v0 / res[1]
+    v = v / res[1]
+    v1 = v1 / res[1]
+
+    u0v = torch.stack([u0, v], dim=-1)
+    u1v = torch.stack([u1, v], dim=-1)
+    uv0 = torch.stack([u, v0], dim=-1)
+    uv1 = torch.stack([u, v1], dim=-1)
+    u0v = u0v.expand(shape[0], res[1], res[0], 2)
+    u1v = u1v.expand(shape[0], res[1], res[0], 2)
+    uv0 = uv0.expand(shape[0], res[1], res[0], 2)
+    uv1 = uv1.expand(shape[0], res[1], res[0], 2)
+
+    img_u0 = functional.grid_sample(img, u0v*2 - 1, mode='bilinear', align_corners=False)
+    img_u1 = functional.grid_sample(img, u1v*2 - 1, mode='bilinear', align_corners=False)
+    img_v0 = functional.grid_sample(img, uv0*2 - 1, mode='bilinear', align_corners=False)
+    img_v1 = functional.grid_sample(img, uv1*2 - 1, mode='bilinear', align_corners=False)
+
+    didu = (img_u1 - img_u0) / 2 / h
+    didv = (img_v1 - img_v0) / 2 / h
+
+    didu = torch.permute(didu, (0, 2, 3, 1))
+    didv = torch.permute(didv, (0, 2, 3, 1))
+    img_u0 = torch.permute(img_u0, (0, 2, 3, 1))
+    img_u1 = torch.permute(img_u1, (0, 2, 3, 1))
+
+    didu = torch.sigmoid(didu)
+    didu = torch.abs(didu - 0.5) * 2
+    didv = torch.sigmoid(didv)
+    didv = torch.abs(didv - 0.5) * 2
+
+    save_img(didu[0], 'didu.exr')
+    save_img(didv[0], 'didv.exr')
+    save_img(img_u0[0], 'u0.exr')
+    save_img(img_u1[0], 'u1.exr')
+
+def test_deriv1(img):
+    pad = torch.nn.ReplicationPad2d(1)
+    device = img.device
+    img = img[None, ...]
+    shape = img.shape
+    res = (shape[2], shape[1])
+    img = torch.permute(img, (0, 3, 1, 2))
+
+    img_padded = pad(img)
+    img_u0 = img_padded[:, :, 1:-1, 0:-2]
+    img_u1 = img_padded[:, :, 1:-1, 2:]
+    img_v0 = img_padded[:, :, 0:-2, 1:-1]
+    img_v1 = img_padded[:, :, 2:, 1:-1]
+
+    didu = (img_u1 - img_u0) / 2
+    didv = (img_v1 - img_v0) / 2
+
+    didu = torch.permute(didu, (0, 2, 3, 1))
+    didv = torch.permute(didv, (0, 2, 3, 1))
+    img_u0 = torch.permute(img_u0, (0, 2, 3, 1))
+    img_u1 = torch.permute(img_u1, (0, 2, 3, 1))
+
+    didu = torch.sigmoid(didu)
+    didu = torch.abs(didu - 0.5) * 2
+    didv = torch.sigmoid(didv)
+    didv = torch.abs(didv - 0.5) * 2
+
+    save_img(didu[0], 'didu_1.exr')
+    save_img(didv[0], 'didv_1.exr')
+    save_img(img_u0[0], 'u0_1.exr')
+    save_img(img_u1[0], 'u1_1.exr')
+
+def test_SVGF():
+    scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
+    scene = Scene(scene_info['tgt'])
+    res = (1280, 720)
+    scene.set_opts(res, spp=1)
+    img = scene.renderC([0], 'shaded')[0]
+    img_depth = scene.renderC([0], 'depth')[0]
+    img_nrm = scene.renderC([0], 'normal')[0]
+
+    img_depth = np.mean(img_depth, axis=-1, keepdims=True)
+    img = np.concatenate([img, img_depth, img_nrm], axis=-1)
+    img = torch.from_numpy(img)
+    img = img.reshape(1, res[1], res[0], -1)
+
+    save_img(img[0,...,:3], 'img.exr')
+    save_img(img[0,...,3:4], 'depth.exr')
+    save_img(img[0,...,4:], 'normal.exr')
+
+    denoiser = svgf.load_denoiser()
+    denoised = denoiser(img, 3, 2, 1, 128)
+
+    save_img(denoised[0], 'denoised_3.exr')
+
+test_SVGF()
+
+# img = load_img('data/meshes/spot/spot_texture.exr')
+# img = torch.from_numpy(img)
+# test_deriv(img)
+
+# v, u = torch.meshgrid([torch.arange(0, 4, dtype=torch.float32),
+#             torch.arange(0, 3, dtype=torch.float32)], indexing='ij')
+# print(u)
+# print(v)
+# u = u + 0.5
+# v = v + 0.5
+# uv = torch.stack([u, v], dim=-1)
+# print(uv)
 
 # prepare_for_mesh_opt('output/lego_dmtet/optimized/ckp.1000.tar', 64, 2.5)
 # preprocess_nerf_synthetic('data/nerf_synthetic/drums/transforms_train.json',
 #                             'data/scenes/nerf_synthetic/drums.xml')
 
-# scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
-# scene = Scene(scene_info['tgt'])
-# albedo = scene._scene.param_map['Mesh[0]'].bsdf.reflectance
-# res = (1920, 1080)
-# scene.set_opts(res, spp=1)
+# v, _ = scene.get_mesh('Mesh[0]')
+# v = torch.from_numpy(v).cuda().requires_grad_()
+
+# v = Vector3fD(v)
+# P = FloatD(0.)
+# ek.set_requires_gradient(P)
+
+# scene._scene.param_map['Mesh[0]'].vertex_positions = v
+# scene._scene.param_map['Mesh[0]'].set_transform(Matrix4fD.translate(Vector3fD(0., 1., 0.)*P))
+# scene._scene.configure()
+
+# img = scene._integrator.renderD(scene._scene, 0)
+
+# ek.forward(P)
+# img_grad = ek.gradient(img)
+
+# save_img(img, 'img.exr', res)
+# save_img(img_grad, 'img_grad.exr', res)
+
+# mat = scene.get_mat('Mesh[0]')
+# mat = torch.from_numpy(mat.reshape(-1,3)).cuda().requires_grad_()
+
+# envmap = scene.get_envmap()
+# envmap = torch.from_numpy(envmap.reshape(-1,3)).cuda().requires_grad_()
+
+# img_demod, mask, img_alb = scene.renderD_demod(v, mat, envmap, 'Mesh[0]', [0])
+# img, mask = scene.renderD(v, mat, envmap, 'Mesh[0]', [0])
+
+
+# save_img(img[0], 'img.exr', res)
+# save_img(img_demod[0], 'img_demod.exr', res)
+# save_img(mask[0], 'mask.exr', res)
+# save_img(img_alb[0], 'alb.exr', res)
+
+# loss = torch.sum(img_demod) + torch.sum(mask) + torch.sum(img_alb)
+# loss = torch.sum(img) + torch.sum(mask)
+
+# loss.backward()
+
+# img_nrm = scene.renderC([0], 'normal')
+# save_img(img_nrm[0], 'nrm.exr', res)
+# img_nrm = torch.from_numpy(img_nrm[0]).cuda().requires_grad_()
+# img_nrm = img_nrm.unsqueeze(0)
+
+# denoiser = load_denoiser('hdr_alb_nrm')
+# img_denoised = denoiser(
+#                 torch.cat([img_demod, img_alb, img_nrm], dim=-1).reshape(1, res[1], res[0], -1))
+# save_img(img_denoised[0], 'img_denoised_hdr_alb_nrm.exr')
 
 # imgs = scene.renderC([0], img_type='shaded')
 # imgs_normal = scene.renderC([0], img_type='normal')
@@ -163,15 +356,20 @@ def test_vert_color():
 # print(input.grad.mean())
 # save_img(output[0], 'denoised.exr', res)
 
+# _x = FloatD()
+
 # class EnokiSquare(torch.autograd.Function):
 #     @staticmethod
 #     def forward(ctx, x):
 #         assert(x.requires_grad)
+#         global _x
 #         ctx.x = FloatD(x)
 
 #         ek.set_requires_gradient(ctx.x)
 
-#         ctx.out = ctx.x * ctx.x
+#         _x = ctx.x
+
+#         ctx.out = _x * _x
 
 #         return ctx.out.torch()
 
@@ -192,11 +390,14 @@ def test_vert_color():
 #     @staticmethod
 #     def forward(ctx, x):
 #         assert(x.requires_grad)
+#         global _x
 #         ctx.x = FloatD(x)
 
 #         ek.set_requires_gradient(ctx.x)
 
-#         ctx.out = ctx.x * ctx.x * ctx.x
+#         _x = ctx.x
+
+#         ctx.out = _x * _x * _x
 
 #         return ctx.out.torch()
 
@@ -227,3 +428,5 @@ def test_vert_color():
 # loss.backward()
 
 # print(x.grad)
+
+# input()

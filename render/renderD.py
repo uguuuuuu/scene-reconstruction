@@ -6,6 +6,8 @@ import torch
 
 from . import config
 
+EPSILON = 1e-5
+
 class RenderD(torch.autograd.Function):
     @staticmethod
     def forward(ctx, v, mat, env):
@@ -43,11 +45,10 @@ class RenderD(torch.autograd.Function):
         scene.configure()
         
         ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
-        ctx.masks = [ek.hmean(integrator_mask.renderD(scene, id)) for id in sensor_ids]
+        ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
 
         imgs = torch.stack([img.torch() for img in ctx.imgs])
         masks = torch.stack([mask.torch() for mask in ctx.masks])
-        masks = masks[...,None]
         
         # ek.cuda_malloc_trim()
         return imgs, masks
@@ -56,7 +57,7 @@ class RenderD(torch.autograd.Function):
     def backward(ctx, *grad_out):
         for i in range(len(ctx.imgs)):
             ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[0][i]))
-            ek.set_gradient(ctx.masks[i], FloatC(grad_out[1][i,:,0]))
+            ek.set_gradient(ctx.masks[i], Vector3fC(grad_out[1][i]))
         FloatD.backward()
 
         bsdf_type = type(config.scene.param_map[config.key].bsdf)
@@ -132,8 +133,9 @@ class RenderD_Demodulate(torch.autograd.Function):
     def forward(ctx, v, mat, env):
         assert(v.requires_grad and mat.requires_grad and env.requires_grad)
         scene = config.scene
-        integrator, integrator_mask = config.integrator, config.integrator_mask
-        integrator_alb = config.integrator_alb
+        integrator_demod, integrator_mask = config.integrator_demod, config.integrator_mask
+        integrator_alb, integrator_depth = config.integrator_alb, config.integrator_depth
+        integrator_normal = config.integrator_normal
         key, sensor_ids = config.key, config.sensor_ids
 
         bsdf_type = type(scene.param_map[key].bsdf)
@@ -166,29 +168,29 @@ class RenderD_Demodulate(torch.autograd.Function):
             raise NotImplementedError('Unsupported BSDF: ' + bsdf_type.__name__)
         scene.configure()
         
-        ctx.imgs = [integrator.renderD(scene, id) for id in sensor_ids]
+        ctx.imgs_demod = [integrator_demod.renderD(scene, id) for id in sensor_ids]
         ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
         ctx.imgs_alb = [integrator_alb.renderD(scene, id) for id in sensor_ids]
-        masks = [ctx.masks[i] > 0. for i in range(len(ctx.masks))]
-        # Only demodulate the albedo where there is surface, not the background
-        ctx.imgs = [ctx.imgs[i] / ek.select(masks[i], ctx.imgs_alb[i], 1.) for i in range(len(ctx.imgs))]
-        ctx.masks = [ek.hmean(mask) for mask in ctx.masks]
+        ctx.imgs_depth = [integrator_depth.renderD(scene, id) for id in sensor_ids]
+        ctx.imgs_normal = [integrator_normal.renderD(scene, id) for id in sensor_ids]
 
-
-        imgs = torch.stack([img.torch() for img in ctx.imgs])
+        imgs_demod = torch.stack([img.torch() for img in ctx.imgs_demod])
         masks = torch.stack([mask.torch() for mask in ctx.masks])
-        masks = masks[...,None]
         imgs_alb = torch.stack([alb.torch() for alb in ctx.imgs_alb])
+        imgs_depth = torch.stack([depth.torch() for depth in ctx.imgs_depth])
+        imgs_normal = torch.stack([normal.torch() for normal in ctx.imgs_normal])
         
-        # ek.cuda_malloc_trim()
-        return imgs, masks, imgs_alb
+        ek.cuda_malloc_trim()
+        return imgs_demod, masks, imgs_alb, imgs_depth, imgs_normal
 
     @staticmethod
     def backward(ctx, *grad_out):
-        for i in range(len(ctx.imgs)):
-            ek.set_gradient(ctx.imgs[i], Vector3fC(grad_out[0][i]))
-            ek.set_gradient(ctx.masks[i], FloatC(grad_out[1][i,:,0]))
+        for i in range(len(ctx.imgs_demod)):
+            ek.set_gradient(ctx.imgs_demod[i], Vector3fC(grad_out[0][i]))
+            ek.set_gradient(ctx.masks[i], Vector3fC(grad_out[1][i]))
             ek.set_gradient(ctx.imgs_alb[i], Vector3fC(grad_out[2][i]))
+            ek.set_gradient(ctx.imgs_depth[i], Vector3fC(grad_out[3][i]))
+            ek.set_gradient(ctx.imgs_normal[i], Vector3fC(grad_out[4][i]))
         FloatD.backward()
 
         bsdf_type = type(config.scene.param_map[config.key].bsdf)
@@ -196,16 +198,28 @@ class RenderD_Demodulate(torch.autograd.Function):
         grad_v = ek.gradient(ctx.v)
         nan_mask = ek.isnan(grad_v)
         grad_v = ek.select(nan_mask, 0, grad_v).torch()
+        max, min = torch.max(grad_v), torch.min(grad_v)
+        if max > 1000 or min < -1000:
+            print('grad_v', max, min)
+        grad_v = torch.where(torch.isfinite(grad_v), grad_v, 0)
 
         grad_env = ek.gradient(ctx.env)
         nan_mask = ek.isnan(grad_env)
         grad_env = ek.select(nan_mask, 0, grad_env).torch()
+        max, min = torch.max(grad_env), torch.min(grad_env)
+        if max > 1000 or min < -1000:
+            print('grad_env', max, min)
+        grad_env = torch.where(torch.isfinite(grad_env), grad_env, 0)
 
         if bsdf_type == psdr_cuda.DiffuseBSDF:
             grad_albedo = ek.gradient(ctx.albedo)
             nan_mask = ek.isnan(grad_albedo)
             grad_albedo = ek.select(nan_mask, 0, grad_albedo).torch()
             grad_mat = grad_albedo
+
+            max, min = torch.max(grad_albedo), torch.min(grad_albedo)
+            if max > 1000 or min < -1000:
+                print('grad_albedo', max, min)
         elif bsdf_type == psdr_cuda.RoughConductorBSDF:
             grad_alpha = ek.gradient(ctx.alpha)
             grad_eta = ek.gradient(ctx.eta)
@@ -240,7 +254,6 @@ class RenderD_Demodulate(torch.autograd.Function):
         else:
             raise NotImplementedError('Unsupported BSDF: ' + bsdf_type.__name__)
 
-        # ek.cuda_malloc_trim()
         result = grad_v, grad_mat, grad_env
 
         # msg = ''
@@ -252,12 +265,13 @@ class RenderD_Demodulate(torch.autograd.Function):
         
         result[1].clamp_(-1000, 1000)
 
-        del ctx.v, ctx.env, ctx.imgs, ctx.masks
+        del ctx.v, ctx.env, ctx.imgs_demod, ctx.masks
         if bsdf_type == psdr_cuda.DiffuseBSDF:
             del ctx.albedo
         else:
             del ctx.alpha, ctx.eta, ctx.k, ctx.specular_reflectance
 
+        ek.cuda_malloc_trim()
         return result
 renderD_demod = RenderD_Demodulate.apply
 

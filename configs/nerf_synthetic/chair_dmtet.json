@@ -6,7 +6,7 @@
     "batch_size": 2,
     "n_sensors": 16,
     "res": [200, 200],
-    "env_res": [512, 256],
+    "env_res": [256, 128],
     "spp_opt": 4,
     "loss_fn": "l1",
     "tonemap": true,
