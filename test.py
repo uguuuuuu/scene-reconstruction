@@ -226,7 +226,7 @@ def test_deriv1(img):
     save_img(img_u0[0], 'u0_1.exr')
     save_img(img_u1[0], 'u1_1.exr')
 
-def test_SVGF():
+def test_SVGF(size):
     scene_info = preprocess_scene('data/scenes/spot_env/spot_env.xml')
     scene = Scene(scene_info['tgt'])
     res = (1280, 720)
@@ -236,20 +236,35 @@ def test_SVGF():
     img_nrm = scene.renderC([0], 'normal')[0]
 
     img_depth = np.mean(img_depth, axis=-1, keepdims=True)
-    img = np.concatenate([img, img_depth, img_nrm], axis=-1)
     img = torch.from_numpy(img)
+    img_depth = torch.from_numpy(img_depth)
+    img_nrm = torch.from_numpy(img_nrm)
     img = img.reshape(1, res[1], res[0], -1)
+    img_depth = img_depth.reshape(1, res[1], res[0], -1)
+    img_nrm = img_nrm.reshape(1, res[1], res[0], -1)
 
-    save_img(img[0,...,:3], 'img.exr')
-    save_img(img[0,...,3:4], 'depth.exr')
-    save_img(img[0,...,4:], 'normal.exr')
+    save_img(img[0], 'img.exr')
+    save_img(img_depth[0], 'depth.exr')
+    save_img(img_nrm[0], 'normal.exr')
 
     denoiser = svgf.load_denoiser()
-    denoised = denoiser(img, 3, 2, 1, 128)
+    denoised = denoiser(img, img_depth, img_nrm, size, 2, 1, 128)
 
-    save_img(denoised[0], 'denoised_3.exr')
+    save_img(denoised[0], f'denoised_{size}.exr')
 
-test_SVGF()
+
+filenames = next(os.walk('misc'))[2]
+for filename in filenames:
+    if filename.endswith('.exr'):
+        print(filename)
+        exr2png(os.path.join('misc', filename))
+
+# prepare_for_mesh_opt('output/drums_dmtet/optimized/ckp.1000.tar', 64, 2.5, 'diffuse')
+
+# dump_opt_mesh('output/drums/optimized/ckp.1000.tar', './')
+
+# preprocess_nerf_synthetic('data/nerf_synthetic/drums/transforms_train.json',
+#                         'data/scenes/nerf_synthetic/drums.xml')
 
 # img = load_img('data/meshes/spot/spot_texture.exr')
 # img = torch.from_numpy(img)

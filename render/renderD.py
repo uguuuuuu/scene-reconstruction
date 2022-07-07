@@ -134,8 +134,8 @@ class RenderD_Demodulate(torch.autograd.Function):
         assert(v.requires_grad and mat.requires_grad and env.requires_grad)
         scene = config.scene
         integrator_demod, integrator_mask = config.integrator_demod, config.integrator_mask
-        integrator_alb, integrator_depth = config.integrator_alb, config.integrator_depth
-        integrator_normal = config.integrator_normal
+        integrator_alb = config.integrator_alb
+        # integrator_depth, integrator_normal = config.integrator_depth, config.integrator_normal
         key, sensor_ids = config.key, config.sensor_ids
 
         bsdf_type = type(scene.param_map[key].bsdf)
@@ -171,17 +171,18 @@ class RenderD_Demodulate(torch.autograd.Function):
         ctx.imgs_demod = [integrator_demod.renderD(scene, id) for id in sensor_ids]
         ctx.masks = [integrator_mask.renderD(scene, id) for id in sensor_ids]
         ctx.imgs_alb = [integrator_alb.renderD(scene, id) for id in sensor_ids]
-        ctx.imgs_depth = [integrator_depth.renderD(scene, id) for id in sensor_ids]
-        ctx.imgs_normal = [integrator_normal.renderD(scene, id) for id in sensor_ids]
+        # ctx.imgs_depth = [integrator_depth.renderD(scene, id) for id in sensor_ids]
+        # ctx.imgs_normal = [integrator_normal.renderD(scene, id) for id in sensor_ids]
 
         imgs_demod = torch.stack([img.torch() for img in ctx.imgs_demod])
         masks = torch.stack([mask.torch() for mask in ctx.masks])
         imgs_alb = torch.stack([alb.torch() for alb in ctx.imgs_alb])
-        imgs_depth = torch.stack([depth.torch() for depth in ctx.imgs_depth])
-        imgs_normal = torch.stack([normal.torch() for normal in ctx.imgs_normal])
+        # imgs_depth = torch.stack([depth.torch() for depth in ctx.imgs_depth])
+        # imgs_normal = torch.stack([normal.torch() for normal in ctx.imgs_normal])
         
-        ek.cuda_malloc_trim()
-        return imgs_demod, masks, imgs_alb, imgs_depth, imgs_normal
+        # ek.cuda_malloc_trim()
+        return imgs_demod, masks, imgs_alb \
+                # , imgs_depth, imgs_normal
 
     @staticmethod
     def backward(ctx, *grad_out):
@@ -189,8 +190,8 @@ class RenderD_Demodulate(torch.autograd.Function):
             ek.set_gradient(ctx.imgs_demod[i], Vector3fC(grad_out[0][i]))
             ek.set_gradient(ctx.masks[i], Vector3fC(grad_out[1][i]))
             ek.set_gradient(ctx.imgs_alb[i], Vector3fC(grad_out[2][i]))
-            ek.set_gradient(ctx.imgs_depth[i], Vector3fC(grad_out[3][i]))
-            ek.set_gradient(ctx.imgs_normal[i], Vector3fC(grad_out[4][i]))
+            # ek.set_gradient(ctx.imgs_depth[i], Vector3fC(grad_out[3][i]))
+            # ek.set_gradient(ctx.imgs_normal[i], Vector3fC(grad_out[4][i]))
         FloatD.backward()
 
         bsdf_type = type(config.scene.param_map[config.key].bsdf)
@@ -201,7 +202,7 @@ class RenderD_Demodulate(torch.autograd.Function):
         max, min = torch.max(grad_v), torch.min(grad_v)
         if max > 1000 or min < -1000:
             print('grad_v', max, min)
-        grad_v = torch.where(torch.isfinite(grad_v), grad_v, 0)
+        grad_v = torch.where(torch.isfinite(grad_v), grad_v, torch.zeros_like(grad_v))
 
         grad_env = ek.gradient(ctx.env)
         nan_mask = ek.isnan(grad_env)
@@ -209,7 +210,7 @@ class RenderD_Demodulate(torch.autograd.Function):
         max, min = torch.max(grad_env), torch.min(grad_env)
         if max > 1000 or min < -1000:
             print('grad_env', max, min)
-        grad_env = torch.where(torch.isfinite(grad_env), grad_env, 0)
+        grad_env = torch.where(torch.isfinite(grad_env), grad_env, torch.zeros_like(grad_env))
 
         if bsdf_type == psdr_cuda.DiffuseBSDF:
             grad_albedo = ek.gradient(ctx.albedo)
@@ -271,7 +272,7 @@ class RenderD_Demodulate(torch.autograd.Function):
         else:
             del ctx.alpha, ctx.eta, ctx.k, ctx.specular_reflectance
 
-        ek.cuda_malloc_trim()
+        # ek.cuda_malloc_trim()
         return result
 renderD_demod = RenderD_Demodulate.apply
 

@@ -13,7 +13,7 @@ from geometry.mesh import Mesh
 
 from render.util import flip_y, save_img, wrap
 
-def write_obj(obj_file: str, mesh: Mesh, save_material=False, verbose=False):
+def write_obj(obj_file: str, mesh: Mesh, save_material=False, shading_model='diffuse', verbose=False):
     folder = os.path.dirname(obj_file)
     name, _ = os.path.splitext(pathlib.Path(obj_file).name)
 
@@ -63,8 +63,11 @@ def write_obj(obj_file: str, mesh: Mesh, save_material=False, verbose=False):
             f.write("\n")
 
     if save_material:
-        if verbose: print("Writing material: texture_kd.exr")
-        save_img(mesh.material, os.path.join(folder, 'texture_kd.exr'))
+        if shading_model == 'diffuse':
+            if verbose: print("Writing material: texture_kd.exr")
+            save_img(mesh.material, os.path.join(folder, 'texture_kd.exr'))
+        else:
+            raise NotImplementedError(f'Not implemented for {shading_model} yet')
 
     if verbose: print("Done exporting mesh")
 

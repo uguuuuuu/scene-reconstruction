@@ -6,15 +6,16 @@
     "batch_size": 2,
     "n_sensors": 16,
     "res": [200, 200],
-    "env_res": [1024, 512],
+    "env_res": [512, 256],
     "spp_opt": 4,
     "loss_fn": "l1",
-    "tonemap": false,
-    "learning_rate": 0.01,
+    "tonemap": true,
+    "learning_rate": 0.005,
     "lambda": 19,
     "alpha": 0,
-    "n_itr": 1000,
+    "n_itr": 500,
     "start_itr": -1,
     "save_interval": 250,
-    "remesh_interval": 400
+    "remesh_interval": -1,
+    "shading_model": "specular"
 }

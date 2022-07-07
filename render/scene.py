@@ -78,11 +78,11 @@ class Scene:
         return imgs
 
     def renderD(self, v, mat, env, key, sensor_ids):
-        if self._scene.opts.sppse > 0:
-            self._scene.configure()
-            for id in sensor_ids:
-                self._integrator.preprocess_secondary_edges(self._scene, id,
-                                np.array([40000, 5, 5, 2]), 16)
+        # if self._scene.opts.sppse > 0:
+        #     self._scene.configure()
+        #     for id in sensor_ids:
+        #         self._integrator.preprocess_secondary_edges(self._scene, id,
+        #                         np.array([10000, 5, 5, 2]), 16)
 
         self._set_config(key, sensor_ids)
         imgs = renderD(v, mat, env)
@@ -91,11 +91,11 @@ class Scene:
         return imgs
 
     def renderD_demod(self, v, mat, env, key, sensor_ids):
-        if self._scene.opts.sppse > 0:
-            self._scene.configure()
-            for id in sensor_ids:
-                self._integrator_demod.preprocess_secondary_edges(self._scene, id,
-                                np.array([40000, 5, 5, 2]), 16)
+        # if self._scene.opts.sppse > 0:
+        #     self._scene.configure()
+        #     for id in sensor_ids:
+        #         self._integrator_demod.preprocess_secondary_edges(self._scene, id,
+        #                         np.array([10000, 5, 5, 2]), 16)
 
         self._set_config(key, sensor_ids)
         imgs = renderD_demod(v, mat, env)
@@ -128,24 +128,29 @@ class Scene:
                 # flip to make res = (w, h)
                 res = (res[1], res[0])
 
-        if type(m.bsdf) == psdr_cuda.DiffuseBSDF:
+        bsdf_type = type(m.bsdf)
+        if bsdf_type == psdr_cuda.DiffuseBSDF:
             m.bsdf.reflectance.resolution = res
-        else:
+        elif bsdf_type == psdr_cuda.RoughConductorBSDF:
             m.bsdf.alpha_u.resolution = res
             m.bsdf.alpha_v.resolution = res
             m.bsdf.eta.resolution = res
             m.bsdf.k.resolution = res
             m.bsdf.specular_reflectance.resolution = res
+        else:
+            raise NotImplementedError('Unsupported BSDF: ' + bsdf_type.__name__)
         if not res_only:
             assert(mat is not None)
             if type(m.bsdf) == psdr_cuda.DiffuseBSDF:
                 m.bsdf.reflectance.data = Vector3fD(mat.reshape(-1,3))
-            else:
+            elif bsdf_type == psdr_cuda.RoughConductorBSDF:
                 m.bsdf.alpha_u.data = FloatD(mat[...,0].reshape(-1))
                 m.bsdf.alpha_v.data = FloatD(mat[...,0].reshape(-1))
                 m.bsdf.eta.data = Vector3fD(mat[...,1:4].reshape(-1,3))
                 m.bsdf.k.data = Vector3fD(mat[...,4:7].reshape(-1,3))
                 m.bsdf.specular_reflectance.data = Vector3fD(mat[...,7:].reshape(-1,3))
+            else:
+                raise NotImplementedError('Unsupported BSDF: ' + bsdf_type.__name__)
     
     def reload_envmap(self, data, res=None):
         if res is None:

@@ -23,6 +23,8 @@ from render.mlptexture import MLPTexture3D
 from render.util import wrap
 from xml_util import formatxml, xmlfile2str
 
+EPSILON = 1e-5
+
 def linear2srgb(img):
     img[img <= 0.0031308] *= 12.92
     img[img > 0.0031308] = 1.055*img[img > 0.0031308]**(1./2.4) - 0.055
@@ -105,6 +107,33 @@ def save_img(img, fname, res=None):
         img = np.uint16(img*65535)
     cv2.imwrite(fname, img)
 
+# Adapted from https://github.com/Tom94/tev
+def normalize_img(img):
+    t = type(img)
+    if t == Vector3fD or t == Vector3fC or t == FloatC or t == FloatD:
+        img = img.numpy()
+    elif t == torch.Tensor:
+        img = img.cpu().numpy()
+
+    min = np.min(img)
+    max = np.max(img)
+
+    img = img - min
+    img = img / ((max - min) + EPSILON)
+
+    if t == Vector3fC:
+        img = Vector3fC(img)
+    elif t == Vector3fD:
+        img = Vector3fD(img)
+    elif t == FloatC:
+        img = FloatC(img)
+    elif t == FloatD:
+        img = FloatD(img)
+    elif t == torch.Tensor:
+        img = torch.from_numpy(img).cuda()
+
+    return img
+
 def load_ckp(pattern, n_itr = -1):
     '''
     Load a PyTorch checkpoint
@@ -173,8 +202,7 @@ def lgt_reg_loss(lgt, ref):
 
     return functional.l1_loss(torch.mean(tonemap(lgt), dim=-1), torch.max(tonemap(ref), dim=-1)[0])
 
-def renderC_img(xml, sensor_ids = None, res = (256, 256), spp = 32, load_string=True, img_type='shaded'):
-    if load_string == False: xml = xmlfile2str(xml)
+def renderC_img(xml, sensor_ids = None, res = (256, 256), spp = 32, img_type='shaded'):
     scene = Scene(xml)
     scene.set_opts(res, spp, sppe=0, sppse=0)
     imgs = scene.renderC(sensor_ids, img_type)
@@ -200,7 +228,7 @@ def prepare_for_mesh_opt(ckp_path, tet_res, tet_scale, shading_model='diffuse'):
     m.v_pos, m.t_pos_idx = remesh(m.v_pos, m.t_pos_idx)
     m = extract_texture(m, material)
     
-    write_obj('data/meshes/source.obj', auto_normals(m), True)
+    write_obj('data/meshes/source.obj', auto_normals(m), True, shading_model=shading_model)
 
     envmap = ckp['envmap']
     env_res = ckp['env_res']
@@ -209,6 +237,17 @@ def prepare_for_mesh_opt(ckp_path, tet_res, tet_scale, shading_model='diffuse'):
     sensor_ids = ckp['sensor_ids']
     sensor_ids = np.array(sensor_ids)
     np.save('data/sensor_ids.npy', sensor_ids)
+
+def dump_opt_mesh(ckp_path, save_dir):
+    ckp = torch.load(ckp_path)
+
+    v = ckp['vertex_positions']
+    f = ckp['faces']
+    uv = ckp['uvs']
+    uv_idx = ckp['uv_idx']
+
+    m = Mesh(v_pos=v, t_pos_idx=f.long(), v_tex=uv, t_tex_idx=uv_idx.long())
+    write_obj(os.path.join(save_dir, 'optimized.obj'), auto_normals(m))
 
 def preprocess_nerf_synthetic(cfg_path, save_path):
     folder = os.path.dirname(cfg_path)
@@ -248,8 +287,14 @@ def preprocess_nerf_synthetic(cfg_path, save_path):
             ET.SubElement(film, 'integer', {'name':'height', 'value':f'{res[1]}'})
 
     root.append(ET.Comment('Materials'))
-    bsdf = ET.SubElement(root, 'bsdf', {'type':'diffuse', 'id':'opt_mat'})
+    bsdf = ET.SubElement(root, 'bsdf', {'type':'diffuse', 'id':'diffuse'})
     ET.SubElement(bsdf, 'rgb', {'name':'reflectance', 'value':'1, 0, 0'})
+    bsdf = ET.SubElement(root, 'bsdf', {'type':'roughconductor', 'id':'specular'})
+    ET.SubElement(bsdf, 'float', {'name':'alpha', 'value':'0.5'})
+    ET.SubElement(bsdf, 'rgb', {'name':'eta', 'value':'1.5, 1.5, 1.5'})
+    ET.SubElement(bsdf, 'rgb', {'name':'k', 'value':'0, 0, 0'})
+    ET.SubElement(bsdf, 'rgb', {'name':'specular_reflectance', 'value':'1, 1, 1'})
+    ET.SubElement(bsdf, 'string', {'name':'distribution', 'value':'ggx'})
 
     root.append(ET.Comment('Emitters'))
     envmap = ET.SubElement(root, 'emitter', {'type':'envmap'})
@@ -306,7 +351,6 @@ def extract_texture(mesh, texture_3d, res=(1024,1024)):
     glctx = dr.RasterizeGLContext()
     rast, _ = dr.rasterize(glctx, uvs_, uv_idx, res)
     pos, _ = dr.interpolate(mesh.v_pos.contiguous(), rast, mesh.t_pos_idx.int())
-    print(pos.shape)
     tex = texture_3d.sample(pos[0])
     # del glctx
     

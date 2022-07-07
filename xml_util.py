@@ -45,10 +45,9 @@ def keep_sensors(scene_xml, sensor_ids):
             root.remove(sensor)
     return ET.tostring(root, encoding='unicode')
 
-def preprocess_scene(fname):
-    '''
-    Construct source scene
-    '''
+def preprocess_scene(fname, shading_model='diffuse'):
+
+    # Construct source scene
     tree = ET.parse(fname); root = tree.getroot()
     p = find_id(root, 'target')
     if p is not None:
@@ -56,18 +55,26 @@ def preprocess_scene(fname):
     p = find_id(root, 'ref_mat')
     if p is not None:
         p[0].remove(p[1])
+    p = find_id(root, 'source')
+    if p is None:
+        raise Exception('Invalid scene file: source shape not found!')
+    mat = p[1].find('ref')
+    if mat is None:
+        raise Exception('Invalid scene file: source shape does not contain a ref tag')
+    mat.attrib['id'] = shading_model
+    for bsdf in root.findall('bsdf'):
+        if bsdf.get('id') != shading_model:
+            root.remove(bsdf)
     source_scene = ET.tostring(root, encoding='unicode')
 
-    '''
-    Construct target scene
-    '''
+    # Construct target scene
     tree = ET.parse(fname); root = tree.getroot()
     p = find_id(root, 'source')
     if p is not None:
         p[0].remove(p[1])
-    p = find_id(root, 'opt_mat')
-    if p is not None:
-        p[0].remove(p[1])
+    for bsdf in root.findall('bsdf'):
+        if bsdf.get('id') != 'ref_mat':
+            root.remove(bsdf)
     target_scene = ET.tostring(root, encoding='unicode')
 
     return {

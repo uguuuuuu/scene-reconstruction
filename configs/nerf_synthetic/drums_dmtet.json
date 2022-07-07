@@ -17,5 +17,5 @@
     "n_itr": 500,
     "start_itr": -1,
     "save_interval": 250,
-    "shading_model": "specular"
+    "shading_model": "diffuse"
 }

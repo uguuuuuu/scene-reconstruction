@@ -1,0 +1,25 @@
+name: recon
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - gdown=4.4.0
+  - igl=2.2.1
+  - ninja=1.11
+  - pip=21.2.4
+  - python=3.9.12
+  - tqdm=4.64.0
+  - pip:
+    - imageio==2.19.3
+    - imageio-ffmpeg==0.4.7
+    - matplotlib==3.5.2
+    - meshplot==0.3.3
+    - numpy==1.22.4
+    - opencv-python==4.5.5.64
+    - polyscope==1.3.1
+    - potpourri3d==0.0.7
+    - git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+    - torch==1.11.0+cu113
+    - torchaudio==0.11.0+cu113
+    - torchvision==0.12.0+cu113
+    - xatlas==0.0.6

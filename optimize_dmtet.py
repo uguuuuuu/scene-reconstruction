@@ -25,7 +25,7 @@ import denoise.svgf as svgf
 
 EPSILON = 1e-3
 
-FLAGS = json.load(open('configs/nerf_synthetic/chair_dmtet.json', 'r'))
+FLAGS = json.load(open('configs/nerf_synthetic/drums_dmtet.json', 'r'))
 sdf_weight, lr = FLAGS['sdf_weight'], FLAGS['learning_rate']
 tet_res, tet_scale = FLAGS['tet_res'], FLAGS['tet_scale']
 batch_size = FLAGS['batch_size']
@@ -161,19 +161,21 @@ if ckp.get('optimizers') is not None:
 # if ckp.get('scheduler') is not None:
 #     scheduler.load_state_dict(ckp['scheduler'])
 # denoiser = oidn.load_denoiser('hdr')
-denoiser = svgf.load_denoiser()
+# denoiser = svgf.load_denoiser()
 
 scene = Scene(scene_info['src'])
 scene.reload_mesh(key, dmtet.getMesh().v_pos, dmtet.getMesh().t_pos_idx.to(torch.int32))
 scene.reload_mat(key, dmtet.getMesh().material)
 scene.reload_envmap(envmap.reshape(env_res[1], env_res[0], 3))
-scene.set_opts(res, spp=spp_opt, sppe=spp_opt)
+scene.set_opts(res, spp=spp_opt, sppe=spp_opt, sppse=0)
 img_losses = []
 mask_losses = []
-reg_losses = []
+sdf_losses = []
+lgt_losses = []
+mat_losses = []
 distances = []
 for it in tqdm(range(start_itr, start_itr + n_itr)):
-    img_loss_ = mask_loss_ = reg_loss_ = 0.
+    img_loss_ = mask_loss_ = sdf_loss_ = lgt_loss_ = mat_loss_ = 0.
     for ids, ref_imgs in DataLoader(trainset, batch_size, True):
 
         m = dmtet.getMesh()
@@ -181,20 +183,29 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             - m.material
         reg_mat = torch.mean(d_mat[...,-3:]) * 0.03 * min(1.0, it / 1000)
 
-        imgs_demod, imgs_mask, imgs_alb, imgs_depth, imgs_nrm = dmtet(lambda v, mat: scene.renderD_demod(v, mat, envmap, key, ids))
-        # imgs = imgs_demod * imgs_alb
+        imgs_demod, imgs_mask, imgs_alb = dmtet(lambda v, mat: scene.renderD_demod(v, mat, envmap, key, ids))
 
-        imgs_demod = imgs_demod.reshape(batch_size, res[1], res[0], 3)
-        imgs_depth = imgs_depth.reshape(batch_size, res[1], res[0], 3)
-        imgs_nrm = imgs_nrm.reshape(batch_size, res[1], res[0], 3)
-        imgs_denoised = denoiser(torch.cat([imgs_demod, torch.mean(imgs_depth, dim=-1, keepdim=True), imgs_nrm]), 3, lerp(1e-4, 2., min(1, it / 1750)), 1, 128)
-        # imgs_denoised = lerp(imgs_demod, imgs_denoised, min(1, it / 1000))
+        # imgs_depth = scene.renderC(ids, 'depth')
+        # imgs_depth = torch.stack([torch.from_numpy(depth).cuda() for depth in imgs_depth])
+        # imgs_nrm = scene.renderC(ids, 'normal')
+        # imgs_nrm = torch.stack([torch.from_numpy(nrm).cuda() for nrm in imgs_nrm])
 
-        imgs_demod = imgs_demod.reshape(batch_size, res[1]*res[0], 3)
-        imgs_depth = imgs_depth.reshape(batch_size, res[1]*res[0], 3)
-        imgs_nrm = imgs_nrm.reshape(batch_size, res[1]*res[0], 3)
-        imgs_denoised = imgs_denoised.reshape(batch_size, res[1]*res[0], 3)
+        # imgs_demod = imgs_demod.reshape(batch_size, res[1], res[0], 3)
+        # imgs_depth = imgs_depth.reshape(batch_size, res[1], res[0], 3)
+        # imgs_nrm = imgs_nrm.reshape(batch_size, res[1], res[0], 3)
+        
+        imgs_denoised = imgs_demod
+        # imgs_denoised = denoiser(imgs_demod)
+        # imgs_denoised = denoiser(imgs_demod, torch.mean(imgs_depth, dim=-1, keepdim=True), imgs_nrm, 8, lerp(1e-4, 2., min(1, it / 1750)), 1, 128)
+        # imgs_denoised = lerp(imgs_demod, imgs_denoised, min(1, it / 2000))
+
+        # imgs_demod = imgs_demod.reshape(batch_size, res[1]*res[0], 3)
+        # imgs_depth = imgs_depth.reshape(batch_size, res[1]*res[0], 3)
+        # imgs_nrm = imgs_nrm.reshape(batch_size, res[1]*res[0], 3)
+        # imgs_denoised = imgs_denoised.reshape(batch_size, res[1]*res[0], 3)
         imgs = imgs_denoised * imgs_alb
+
+        # imgs = imgs_demod * imgs_alb
 
         img_loss = loss_fn(imgs, ref_imgs[...,:3])
         mask_loss = functional.mse_loss(torch.mean(imgs_mask, dim=-1), ref_imgs[...,3])
@@ -226,14 +237,19 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             scene.reload_mat(key, m.material, res_only=True)
             img_loss_ += img_loss
             mask_loss_ += mask_loss
-            reg_loss_ += reg_sdf
-            if it % 2 == 0:
+            sdf_loss_ += reg_sdf
+            lgt_loss_ += reg_lgt
+            mat_loss_ += reg_mat
+            if it % 4 == 0:
                 for i, id in enumerate(ids):
                     save_img(imgs[i], f'{outdir}/train/{sensor_ids[id]}/train.{it+1:04}.exr', res)
                     save_img(imgs_demod[i], f'{outdir}/train/{sensor_ids[id]}/train_demod.{it+1:04}.exr', res)
                     save_img(imgs_mask[i], f'{outdir}/train/{sensor_ids[id]}/train_mask.{it+1:04}.exr', res)
                     save_img(imgs_alb[i], f'{outdir}/train/{sensor_ids[id]}/train_alb.{it+1:04}.exr', res)
-                    save_img(imgs_denoised[i], f'{outdir}/train/{sensor_ids[id]}/train_denoised.{it+1:04}.exr', res)
+                    # save_img(imgs_depth[i], f'{outdir}/train/{sensor_ids[id]}/train_depth.{it+1:04}.exr', res)
+                    # save_img(imgs_nrm[i], f'{outdir}/train/{sensor_ids[id]}/train_normal.{it+1:04}.exr', res)
+                    # save_img(imgs_denoised[i], f'{outdir}/train/{sensor_ids[id]}/train_denoised.{it+1:04}.exr', res)
+                save_img(envmap, f'{outdir}/train/train_envmap.{it+1:04}.exr', env_res)
     # scheduler.step()
     with torch.no_grad():
         if (it+1)%save_interval == 0:
@@ -249,7 +265,9 @@ for it in tqdm(range(start_itr, start_itr + n_itr)):
             }, f'{outdir}/optimized/ckp.{it+1}.tar')
         img_losses.append(img_loss_.cpu().numpy())
         mask_losses.append(mask_loss_.cpu().numpy())
-        reg_losses.append(reg_loss_.cpu().numpy())
+        sdf_losses.append(sdf_loss_.cpu().numpy())
+        lgt_losses.append(lgt_loss_.cpu().numpy())
+        mat_losses.append(mat_loss_.cpu().numpy())
         if ref_v is not None and ref_f is not None:
             v, f = scene.get_mesh(key, True)
             distances.append(hausdorff(v, f, ref_v, ref_f))
@@ -272,15 +290,21 @@ ek.cuda_malloc_trim()
 
 plt.plot(img_losses, label='Image Loss')
 plt.plot(mask_losses, label='Mask Loss')
-plt.plot(reg_losses, label='SDF Regularization Loss')
 plt.yscale('log')
 plt.legend()
-plt.savefig(f'{outdir}/stats/losses_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
+plt.savefig(f'{outdir}/stats/losses_itr{it+1}_lr{lr}.png')
+plt.close()
+plt.plot(sdf_losses, label='SDF Regularization Loss')
+plt.plot(lgt_losses, label='Light Regularization Loss')
+plt.plot(mat_losses, label='Material Regularization Loss')
+plt.yscale('log')
+plt.legend()
+plt.savefig(f'{outdir}/stats/losses_reg_itr{it+1}_lr{lr}.png')
 plt.close()
 if len(distances) != 0:
     plt.plot(distances)
     plt.ylabel("Hausdorff Distance")
-    plt.savefig(f'{outdir}/stats/distances_itr{it+1}_lr{lr}_weight{sdf_weight}.png')
+    plt.savefig(f'{outdir}/stats/distances_itr{it+1}_lr{lr}.png')
 
 for id in sensor_ids:
     imgs2video(f"{outdir}/train/{id}/train.*.exr", f"{outdir}/train/{id}.mp4", 30)
@@ -297,9 +321,11 @@ Issues:
             - increase spp
             - increase resolution
     - Lighting is partially baked in to the material
-        - use the light regularizer in Hasselgren et al. https://arxiv.org/abs/2206.03380
-    - Adding the oidn denoiser increases memory usage
-    - Optimization seems to not converge under the current configuration (res (200, 200), spp=sppe=2)
+    - Denoising using oidn causes the geometry to be broken apart
+    - Using SVGF causes the geometry to disappear
+        - the quality of the gradients of the vertex positions and environment is low, i.e. they become infinite sometimes 
+        - detach depth and normals, i.e. do not calculate derivatives wrt them
+        - disable SVGF during the first several iterations
 '''
 
 '''
@@ -310,8 +336,9 @@ TODO
     - Experiment with different shading models
     - Experiment with different datasets
     - Validate after training
-    - Implement the Disney BRDF
     - Implement other denoisers
-        - the spatial component of SVGF as in Hasselgren et al. https://arxiv.org/abs/2206.03380
         - the kernel-predicting neural denoiser as in Neural Temporal Adaptive Sampling and Denoising
+    - Find a way to optimize complex scenes stably with low resolution, low sample counts, and a small
+    number of sensors
+    - Try other physically-based differentiable renderers
 '''
