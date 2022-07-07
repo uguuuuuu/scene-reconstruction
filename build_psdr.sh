@@ -17,18 +17,23 @@ if [ ! -d "build" ]; then
     cd build
 
     cmake -DENOKI_CUDA=ON -DENOKI_AUTODIFF=ON -DENOKI_PYTHON=ON ..
-    make -j 12 
+    make -j
 fi
 
 
 
 cd $RECON_DIR/ext/psdr-cuda
+
+if [ ! -d "ext/optix" ]; then
+    ln -s $1 ext/optix
+fi
+
 if [ ! -d "build" ]; then
     mkdir build
     cd build
 
-    cmake -DENOKI_DIR="$RECON_DIR/ext/enoki" -DPYTHON_INCLUDE_PATH="$HOME/miniconda3/envs/recon/include/python3.9" ..
-    make -j 12
+    cmake -DENOKI_DIR="$RECON_DIR/ext/enoki" -DPYTHON_INCLUDE_PATH=$2 ..
+    make -j
 fi
 
 cd $RECON_DIR
